@@ -1,0 +1,17 @@
+agentfield
+solc-select  # Solidity compiler
+web3  # Ethereum interaction
+pytest  # Testing framework
+requests  # For API calls to partners
+pydantic  # Already in agentfield, but ensure
+python-gitlab  # GitLab API / MCP integration
+python-dotenv  # Environment variable loading
+# Placeholder for partner SDKs (assume available via LiteLLM or direct APIs)
+# qwen-cloud
+# brightdata
+# actionbook
+# evermind
+# nosana
+# qoder
+# tokenrouter
+# z-ai

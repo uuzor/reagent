@@ -1,0 +1,585 @@
+Harness
+Dispatch complex tasks to coding agents — Claude Code, Codex, Gemini CLI, and OpenCode
+
+Any coding agent, one API, structured output
+Dispatch complex tasks to coding agents that can read files, write code, run commands, and return structured results. Unlike app.ai() which makes a single LLM call, the harness spawns a multi-turn agent with full tool access -- Claude Code, Codex, Gemini CLI, or OpenCode -- that can navigate codebases, run tests, and produce verified output with cost controls.
+
+Python
+TypeScript
+Go
+
+from pydantic import BaseModel
+from agentfield import Agent, HarnessConfig
+class MigrationPlan(BaseModel):
+    sql_statements: list[str]  # ordered DDL/DML
+    rollback_steps: list[str]  # how to undo each change
+    risk_assessment: str       # safety analysis
+# Structured output from a coding agent — reads files, writes SQL, validates
+result = await app.harness(
+    f"Analyze the database schema and generate a migration plan: {description}",
+    schema=MigrationPlan,       # validated typed output, not free text
+    max_budget_usd=1.00,        # hard cost cap — agent stops if exceeded
+)
+# Full observability — cost, turns, duration, session replay
+print(f"${result.cost_usd:.3f}")        # $0.042
+print(f"{result.num_turns} turns")      # 8 turns
+print(f"{result.duration_ms}ms")        # 12400ms
+# Swap providers per-call — Claude Code, Codex, Gemini, OpenCode
+result = await app.harness(
+    "Generate a test suite for the payment module.",
+    provider="codex",               # OpenAI Codex for this task
+    model="o4-mini",
+    max_turns=40,
+)
+# Different providers for different strengths
+refactor = await app.harness(
+    "Refactor auth to use JWT. Run tests after.",
+    provider="gemini",              # Gemini CLI for broad refactors
+    model="gemini-2.5-pro",
+    max_budget_usd=2.00,
+)
+# Robust error handling — typed failure modes, not just true/false
+if result.is_error:
+    match result.failure_type:
+        case "timeout":  log.warning(f"Timed out after {result.duration_ms}ms")
+        case "crash":    log.error(f"Agent crashed: {result.error_message}")
+        case "schema":   log.warning("Output didn't match schema after retries")
+        case "api_error": log.error("Transient API error")
+else:
+    plan = result.parsed              # MigrationPlan, fully validated
+What just happened
+The harness example did not just call a model. It launched a coding agent with tool access, enforced turn and budget limits, and returned structured output with execution metrics. That is the main distinction this page needs to make visible immediately.
+
+
+{
+  "provider": "codex",
+  "max_budget_usd": 1.0,
+  "num_turns": 8,
+  "duration_ms": 12400,
+  "parsed_output": "validated_against_schema"
+}
+How It Works
+The harness uses a file-write strategy for structured output. Instead of parsing JSON from the LLM response text (which is brittle), the harness instructs the coding agent to write its output to a deterministic file path using its Write tool.
+
+File System
+Coding Agent
+Harness
+alt
+[Validation fails]
+prompt + schema instructions
+reads files, runs commands
+file contents, command output
+reasons over results
+writes JSON to .agentfield_output.json
+reads output file
+JSON content
+validates against schema
+cosmetic repair attempt
+follow-up prompt
+writes corrected output
+reads corrected file
+re-validates (or full retry)
+Click to expand
+This approach works across all providers because every coding agent has a Write tool.
+
+Providers
+Claude Code
+The default provider. Uses the claude CLI with --print mode for non-interactive execution.
+
+
+HarnessConfig(
+    provider="claude-code",
+    model="sonnet",          # "sonnet", "opus", or full model ID
+    max_turns=30,
+    permission_mode="auto",  # Skip permission prompts
+)
+Codex
+OpenAI's Codex CLI agent.
+
+
+HarnessConfig(
+    provider="codex",
+    model="o4-mini",
+    max_turns=20,
+    codex_bin="codex",       # Path to codex binary
+)
+Gemini CLI
+Google's Gemini CLI agent.
+
+
+HarnessConfig(
+    provider="gemini",
+    model="gemini-2.5-pro",
+    max_turns=25,
+    gemini_bin="gemini",     # Path to gemini binary
+)
+OpenCode
+OpenCode agent with optional server mode for avoiding session bugs.
+
+
+HarnessConfig(
+    provider="opencode",
+    model="sonnet",
+    max_turns=30,
+    opencode_bin="opencode",
+    opencode_server="http://127.0.0.1:4096",  # Optional server URL
+    project_dir="/path/to/repo",               # Agent working context
+)
+Patterns
+Structured Output with Schema
+The harness instructs the coding agent to write validated JSON to a file. On parse failure, it attempts cosmetic repair (fixing markdown fences, trailing commas, unclosed brackets), then sends a follow-up prompt, then retries from scratch.
+
+
+class ArchitectureAnalysis(BaseModel):
+    components: list[str]
+    dependencies: dict[str, list[str]]
+    risk_areas: list[str]
+    migration_effort: str  # "low", "medium", "high"
+result = await app.harness(
+    "Analyze the architecture of this codebase and identify migration risks.",
+    schema=ArchitectureAnalysis,
+    cwd="/path/to/project",
+)
+if not result.is_error:
+    analysis = result.parsed
+    print(f"Risk areas: {analysis.risk_areas}")
+    print(f"Migration effort: {analysis.migration_effort}")
+Cost-Capped Execution
+Prevent runaway costs by setting a budget cap per call.
+
+
+result = await app.harness(
+    "Refactor the authentication module to use JWT.",
+    max_budget_usd=1.00,
+    max_turns=50,
+)
+if result.cost_usd is not None:
+    print(f"Cost: ${result.cost_usd:.2f}")
+print(f"Turns: {result.num_turns}")
+Per-Call Provider Override
+Override the configured provider for specific tasks.
+
+
+# Default: Claude Code for most tasks
+app = Agent(
+    harness_config=HarnessConfig(provider="claude-code"),
+)
+# Override to Codex for a specific call
+result = await app.harness(
+    "Generate a comprehensive test suite for the payment module.",
+    provider="codex",
+    model="o4-mini",
+    max_turns=40,
+)
+Error Handling
+Check is_error and failure_type for robust error handling.
+
+
+result = await app.harness(
+    "Deploy the staging environment.",
+    max_budget_usd=0.50,
+)
+if result.is_error:
+    match result.failure_type:
+        case "timeout":
+            log.warning(f"Harness timed out after {result.duration_ms}ms")
+        case "crash":
+            log.error(f"Agent crashed: {result.error_message}")
+        case "schema":
+            log.warning("Output did not match schema after retries")
+        case "api_error":
+            log.error("Transient API error -- will retry on next invocation")
+else:
+    print(result.text)
+HarnessConfig
+HarnessResult
+Every harness call returns a HarnessResult with full observability.
+
+Field	Type	Description
+result	string?	Raw text output from the coding agent
+parsed	Any?	Schema-validated object (if schema was provided)
+is_error	bool	Whether the execution failed
+error_message	string?	Error description on failure
+failure_type	FailureType	none, crash, timeout, api_error, no_output, schema (Python/Go only — not available in TypeScript SDK)
+cost_usd	float?	Total cost of the execution
+num_turns	int	Number of agent iterations
+duration_ms	int	Wall-clock execution time
+session_id	string	Provider session identifier
+messages	list[dict]	Full conversation history
+text	string	Property -- returns result or empty string
+
+
+AI Generation
+Text generation and structured output with app.ai() — the universal method for LLM calls
+
+Structured AI output via app.ai() and Pydantic schemas
+Call any LLM with a single method. Pass a prompt, get text back. Pass a schema, get a validated object back. Override the model, temperature, or any other parameter per-call without changing your agent config. Works with 100+ models via LiteLLM (Python), Vercel AI SDK (TypeScript), or OpenAI-compatible APIs (Go).
+
+Python
+TypeScript
+Go
+
+from pydantic import BaseModel
+class LeadScore(BaseModel):
+    score: float          # 0-100 likelihood to convert
+    reasoning: str        # why this score
+    next_action: str      # recommended sales action
+    urgency: str          # "high" | "medium" | "low"
+# Structured output — pass a schema, get a validated typed object back
+lead = await app.ai(
+    system="You are a B2B sales analyst scoring inbound leads.",
+    user="Company: Acme Corp, 500 employees, viewed pricing page 3x this week",
+    schema=LeadScore,
+)
+print(lead.score)        # 82.5  — not a string, a float
+print(lead.next_action)  # "Schedule demo within 24 hours"
+# Override model per-call — cheap model for fast classification
+category = await app.ai(
+    user=ticket_text,
+    schema=TicketCategory,
+    model="openai/gpt-4o-mini",        # 10x cheaper, good enough for routing
+)
+# Powerful model for deep analysis — same method, different model
+analysis = await app.ai(
+    system="Provide root cause analysis with remediation steps.",
+    user=ticket_text,
+    schema=RootCauseAnalysis,
+    model="anthropic/claude-sonnet-4-20250514",  # best reasoning for hard problems
+)
+# Streaming — real-time token delivery for interactive UIs
+response = await app.ai(
+    system="Write a detailed post-mortem.",
+    user=incident_summary,
+    stream=True,
+)
+async for chunk in response:
+    print(chunk.choices[0].delta.content, end="")
+# Automatic fallback chain — if primary model fails, try the next
+app = Agent(
+    node_id="resilient-agent",
+    ai_config=AIConfig(
+        model="anthropic/claude-sonnet-4-20250514",
+        fallback_models=["openai/gpt-4o", "deepseek/deepseek-chat"],
+        max_cost_per_call=0.05,         # hard cost cap per call
+    ),
+)
+What just happened
+The same ai() call handled three common production modes without changing your surrounding code: typed extraction with a schema, a cheap model override for simple classification, and a stronger model override for deeper analysis. The page’s main point is that you do not need separate client stacks for each of those paths.
+
+
+{
+  "lead_score": {
+    "score": 8.7,
+    "next_action": "schedule_demo"
+  },
+  "ticket_category": {
+    "category": "billing"
+  },
+  "analysis": {
+    "root_cause": "misconfigured webhook retry policy"
+  }
+}
+What You Get
+Text generation from 100+ LLMs via a single method call
+Structured output validated against Pydantic models (Python), Zod schemas (TypeScript), or Go structs
+Automatic prompt trimming to fit model context windows
+Rate limit retry with exponential backoff and circuit breaker
+Model fallbacks when primary model fails
+Streaming for real-time token delivery
+Multimodal input auto-detection for images, audio, and files
+Patterns
+System + User Prompts
+The most common pattern separates instruction from input.
+
+Python
+TypeScript
+Go
+
+response = await app.ai(
+    system="You are a senior code reviewer. Be concise and actionable.",
+    user=code_diff,
+)
+Structured Output
+Schema-validated output eliminates parsing and handles malformed JSON automatically.
+
+Python
+TypeScript
+Go
+
+class RiskAssessment(BaseModel):
+    risk_level: str          # "low", "medium", "high", "critical"
+    confidence: float        # 0.0-1.0
+    findings: list[str]
+    recommendation: str
+assessment = await app.ai(
+    system="Assess security risk in the following code.",
+    user=source_code,
+    schema=RiskAssessment,
+    model="anthropic/claude-sonnet-4-20250514",
+    temperature=0.0,  # Deterministic for security analysis
+)
+if assessment.risk_level == "critical":
+    await escalate(assessment)
+Model Override Per Call
+Use different models for different tasks without reconfiguring the agent.
+
+
+# Fast model for classification
+category = await app.ai(
+    user=ticket_text,
+    schema=TicketCategory,
+    model="openai/gpt-4o-mini",
+)
+# Powerful model for deep analysis
+analysis = await app.ai(
+    system="Provide a thorough root cause analysis.",
+    user=ticket_text,
+    schema=RootCauseAnalysis,
+    model="anthropic/claude-sonnet-4-20250514",
+)
+Streaming
+Stream tokens in real-time for interactive applications.
+
+Python
+TypeScript
+
+response = await app.ai(
+    system="Write a detailed technical blog post.",
+    user="Topic: Building multi-agent systems",
+    stream=True,
+)
+# response is a LiteLLM streaming object
+async for chunk in response:
+    print(chunk.choices[0].delta.content, end="")
+Model Fallbacks
+Configure automatic fallback to alternative models when the primary fails.
+
+
+app = Agent(
+    node_id="resilient-agent",
+    ai_config=AIConfig(
+        model="anthropic/claude-sonnet-4-20250514",
+        fallback_models=[
+            "openai/gpt-4o",
+            "openrouter/google/gemini-2.5-flash",
+        ],
+        enable_rate_limit_retry=True,
+        rate_limit_max_retries=5,
+    ),
+)
+If the primary model hits a rate limit or returns an error, the SDK automatically tries each fallback in order.
+
+Rate Limit Configuration
+Fine-tune retry behavior for rate limits and transient errors via AIConfig.
+
+
+app = Agent(
+    node_id="high-throughput-agent",
+    ai_config=AIConfig(
+        model="anthropic/claude-sonnet-4-20250514",
+        enable_rate_limit_retry=True,
+        # Retry tuning
+        rate_limit_max_retries=10,             # max retry attempts (default: 5)
+        rate_limit_base_delay=1.0,             # initial delay in seconds (default: 0.5)
+        rate_limit_max_delay=60.0,             # cap on exponential backoff (default: 30.0)
+        rate_limit_jitter_factor=0.5,          # random jitter 0.0-1.0 (default: 0.25)
+        # Circuit breaker — stop retrying after repeated failures
+        rate_limit_circuit_breaker_threshold=10,   # failures before tripping (default: 5)
+        rate_limit_circuit_breaker_timeout=120.0,  # seconds before half-open retry (default: 30)
+    ),
+)
+Field	Type	Default	Description
+rate_limit_max_retries	int	5	Maximum retry attempts before failing
+rate_limit_base_delay	float	0.5	Initial backoff delay in seconds
+rate_limit_max_delay	float	30.0	Maximum backoff delay cap
+rate_limit_jitter_factor	float	0.25	Random jitter factor (0.0 = none, 1.0 = full)
+rate_limit_circuit_breaker_threshold	int	5	Consecutive failures to trip the circuit breaker
+rate_limit_circuit_breaker_timeout	int	30	Seconds before attempting recovery
+Cost Management
+Set hard cost limits to prevent runaway spending.
+
+
+app = Agent(
+    node_id="budget-agent",
+    ai_config=AIConfig(
+        model="anthropic/claude-sonnet-4-20250514",
+        max_cost_per_call=0.05,       # estimated cost cap per individual call
+        daily_budget=10.00,           # daily spend limit
+    ),
+)
+Field	Type	Default	Description
+max_cost_per_call	float	None	Maximum estimated cost per individual AI call
+daily_budget	float	None	Maximum daily spend across all calls (resets at midnight UTC)
+Memory Scope Injection
+Use memory_scope to automatically inject memory context into AI calls. The SDK fetches the specified scopes and appends their contents to the system prompt.
+
+Python
+TypeScript
+
+@app.reasoner()
+async def chat(message: str) -> dict:
+    # Inject session memory and actor memory into the AI call
+    response = await app.ai(
+        system="You are a helpful assistant. Use the provided context.",
+        user=message,
+        memory_scope=["session", "actor"],  # auto-fetches and injects memory
+    )
+    return {"response": response}
+# Equivalent to manually doing:
+# session_data = await app.memory.session(session_id).get("context")
+# actor_data = await app.memory.actor(actor_id).get("preferences")
+# then appending them to the system prompt
+
+
+Service Discovery
+Find agents, reasoners, and skills at runtime through the control plane discovery API.
+
+Runtime service discovery — agents find each other
+Find every agent, reasoner, and skill in your fleet -- at runtime, not at deploy time.
+
+Hard-coded service addresses break the moment you scale past a handful of agents. AgentField's discovery API lets any agent query the control plane for live capabilities, filtered by tags, health status, or name patterns. Build orchestrators that discover what is available, introspect input schemas, and dynamically decide which agents to call -- all without a single hardcoded address.
+
+Python
+TypeScript
+Go
+
+@app.reasoner(tags=["orchestrator"])
+async def dynamic_router(question: str) -> dict:
+    # 1. Discover active agents with input schemas — zero hardcoded addresses
+    caps = app.discover(
+        tags=["public"],
+        health_status="active",
+        include_input_schema=True,
+        format="json",
+    )
+    print(f"{caps.json.total_agents} agents online, {len(caps.json.capabilities)} capabilities")
+    # 2. Feed discovered capabilities + schemas into an LLM — it picks the best agent
+    result = await app.ai(
+        system=(
+            "You are a routing agent. Pick the best tool for the user's question.\n"
+            "Available capabilities:\n" + caps.raw
+        ),
+        user=question,
+        tools="discover",  # built-in: turns discovered capabilities into callable tools
+    )
+    # 3. The LLM chose an agent and called it — no static routing table needed
+    return result
+# New agents register at startup → the router discovers them automatically.
+# No config changes, no redeployment, no service mesh.
+What just happened
+
+The agent queried the live control plane registry instead of relying on hardcoded targets
+Discovery results included enough metadata to drive dynamic routing decisions
+New active agents could appear in routing immediately after registration
+Example discovery summary:
+
+
+{
+  "discovered_at": "2026-03-23T12:00:00Z",
+  "total_agents": 2,
+  "total_reasoners": 2,
+  "total_skills": 0,
+  "pagination": { "limit": 100, "offset": 0, "has_more": false },
+  "capabilities": [
+    {
+      "agent_id": "weather-agent",
+      "base_url": "http://weather-agent:9000",
+      "version": "1.0.0",
+      "health_status": "active",
+      "deployment_type": "sidecar",
+      "last_heartbeat": "2026-03-23T12:00:00Z",
+      "reasoners": [
+        { "id": "forecast", "tags": ["public", "weather"], "invocation_target": "weather-agent:forecast" }
+      ],
+      "skills": []
+    },
+    {
+      "agent_id": "translator",
+      "base_url": "http://translator:9000",
+      "version": "1.0.0",
+      "health_status": "active",
+      "deployment_type": "sidecar",
+      "last_heartbeat": "2026-03-23T12:00:00Z",
+      "reasoners": [
+        { "id": "translate", "tags": ["public", "translation"], "invocation_target": "translator:translate" }
+      ],
+      "skills": []
+    }
+  ]
+}
+What you get
+Runtime registry -- every agent auto-registers its reasoners and skills on startup.
+Tag-based filtering -- find agents by domain ("insurance", "nlp") instead of memorizing node IDs.
+Health-aware routing -- filter to only active agents so you never call a dead endpoint.
+Schema introspection -- request input/output schemas to build dynamic tool calling at runtime.
+Three output formats -- json for programmatic use, compact for LLM context windows, xml for legacy integrations.
+Full SDK examples
+Python
+TypeScript
+Go
+
+from agentfield import Agent
+app = Agent(node_id="orchestrator")
+# Discover all registered capabilities
+result = app.discover()
+print(f"Found {result.json.total_agents} agents")
+# Filter by tags
+result = app.discover(tags=["insurance", "claims"])
+for cap in result.json.capabilities:
+    print(f"{cap.agent_id}: {[r.id for r in cap.reasoners]}")
+# Only active agents, with input schemas
+result = app.discover(
+    health_status="active",
+    include_input_schema=True,
+    include_output_schema=True,
+)
+# Compact format for feeding into LLM context
+result = app.discover(format="compact")
+print(result.raw)  # raw string for LLM context
+# result.compact is a CompactDiscoveryResponse with .reasoners and .skills
+Auto-registration
+Agents register themselves with the control plane automatically. When an agent starts, it sends a heartbeat containing its node ID, version, and the full list of reasoners and skills it exposes. The control plane updates the registry, and other agents can immediately discover the new capabilities.
+
+
+af server          # Terminal 1 -- control plane at http://localhost:8080
+python app.py      # Terminal 2 -- agent registers on startup
+The agent exposes a /discover endpoint that the control plane polls. No manual registration step is required.
+
+Patterns
+Dynamic Tool Calling
+Use discovery to build tool definitions for LLM calls at runtime. When agents come and go, the tool list updates automatically.
+
+Python
+TypeScript
+Go
+
+@app.reasoner()
+async def smart_router(question: str) -> dict:
+    # Discover available capabilities
+    caps = app.discover(
+        tags=["public"],
+        include_input_schema=True,
+        health_status="active",
+    )
+    # Feed discovered tools into an LLM call
+    result = await app.ai(
+        system="Route the question to the best available agent.",
+        user=question,
+        tools="discover",  # built-in shorthand
+    )
+    return result
+Health-Gated Failover
+Before calling a specific agent, verify it is active. If not, discover an alternative with the same tags.
+
+
+async def call_with_failover(target: str, tags: list[str], **kwargs) -> dict:
+    try:
+        return await app.call(target, **kwargs)
+    except Exception:
+        # Find an active alternative
+        fallback = app.discover(tags=tags, health_status="active")
+        if not fallback.json.capabilities:
+            raise RuntimeError(f"No active agents with tags {tags}")
+        alt_cap = fallback.json.capabilities[0]
+        alt_target = f"{alt_cap.agent_id}.{alt_cap.reasoners[0].id}"
+        return await app.call(alt_target, **kwargs)

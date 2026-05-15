@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /workspaces/reagent -type f -name \"*.py\" -o -name \"*.md\" -o -name \"*.txt\" -o -name \"*.json\" -o -name \"*.yaml\" -o -name \"*.yml\" | head -50)",
+      "WebFetch(docs.gitlab.com)",
+      "WebFetch(forum.gitlab.com)",
+      "Bash(cd /workspaces/reagent/reagent && python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['gitlab_client.py', 'routers/orchestrator_router.py', 'routers/coding_router.py', 'routers/testing_router.py', 'routers/deployment_router.py', 'main.py']]\" && echo \"All files parse OK\")",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(python main.py 2>&1 | head -20)"
+    ]
+  }
+}

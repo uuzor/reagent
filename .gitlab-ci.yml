@@ -1,0 +1,76 @@
+# .gitlab-ci.yml — CI/CD pipeline for reagent smart contract development
+# Place this in the root of your GitLab project.
+#
+# Required CI/CD variables (Settings > CI/CD > Variables):
+#   SOLC_VERSION  — Solidity compiler version (default: 0.8.20)
+#   NETWORK       — Target blockchain network (default: sepolia)
+#   RPC_URL       — Ethereum RPC endpoint URL
+#   PRIVATE_KEY   — Deployer wallet private key (masked, protected)
+
+stages:
+  - build
+  - test
+  - audit
+  - deploy
+
+variables:
+  SOLC_VERSION: "0.8.20"
+  NETWORK: "sepolia"
+
+# -- Build: Compile Solidity contracts --
+compile:
+  stage: build
+  image: ethereum/solc:0.8.20
+  script:
+    - echo "Compiling contracts with solc $SOLC_VERSION"
+    - |
+      for f in contracts/*.sol; do
+        echo "Compiling $f..."
+        solc --bin --abi --optimize "$f" -o build/
+      done
+  artifacts:
+    paths:
+      - build/
+    expire_in: 1 week
+
+# -- Test: Run Foundry/Hardhat tests --
+test-contracts:
+  stage: test
+  image: ghcr.io/foundry-rs/foundry:latest
+  script:
+    - echo "Running test suite..."
+    - forge test --gas-report --detailed-cmd
+  allow_failure: false
+
+# -- Audit: Run Slither static analysis --
+audit-contracts:
+  stage: audit
+  image: python:3.11
+  script:
+    - pip install slither-analyzer
+    - slither . --detect reentrancy,arbitrary-send,unprotected-selfdestruct
+  allow_failure: true
+  artifacts:
+    reports:
+      codequality: slither-report.json
+
+# -- Deploy: Deploy to target network --
+deploy-contract:
+  stage: deploy
+  image: node:20
+  script:
+    - echo "Deploying to $NETWORK..."
+    - |
+      if [ -f "scripts/deploy.js" ]; then
+        npx hardhat run scripts/deploy.js --network $NETWORK
+      elif [ -f "script/Deploy.s.sol" ]; then
+        forge script script/Deploy.s.sol --rpc-url $RPC_URL --private-key $PRIVATE_KEY --broadcast --verify
+      else
+        echo "No deployment script found. Add scripts/deploy.js or script/Deploy.s.sol"
+        exit 1
+      fi
+  environment:
+    name: $NETWORK
+  only:
+    - main
+  when: manual
