@@ -7,7 +7,14 @@
       "Bash(cd /workspaces/reagent/reagent && python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['gitlab_client.py', 'routers/orchestrator_router.py', 'routers/coding_router.py', 'routers/testing_router.py', 'routers/deployment_router.py', 'main.py']]\" && echo \"All files parse OK\")",
       "Bash(python:*)",
       "Bash(pip install:*)",
-      "Bash(python main.py 2>&1 | head -20)"
+      "Bash(python main.py 2>&1 | head -20)",
+      "Bash(cd /workspaces/reagent/reagent && python -m pytest tests/test_gitlab_client.py tests/test_file_manager.py -v 2>&1 | head -80)",
+      "Bash(cd /workspaces/reagent && python -m pytest reagent/tests/ -v --tb=short 2>&1 | head -80)",
+      "Bash(cd /workspaces/reagent && python -m pytest reagent/tests/test_gitlab_client.py -v --tb=short 2>&1)",
+      "Bash(python -m pytest reagent/tests/ -v --tb=short 2>&1)",
+      "Bash(python -m pytest reagent/tests/test_gitlab_client.py -v --tb=short 2>&1)",
+      "Bash(python -m pytest reagent/tests/ -v --tb=long -k \"test_reads_env\" 2>&1 | head -40)",
+      "Bash(echo \"GITLAB_URL=${GITLAB_URL:-not set}\" && echo \"GITLAB_TOKEN=${GITLAB_TOKEN:+set \\(hidden\\)}\" && echo \"GITLAB_PROJECT_ID=${GITLAB_PROJECT_ID:-not set}\")"
     ]
   }
 }
