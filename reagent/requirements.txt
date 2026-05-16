@@ -2,6 +2,7 @@ agentfield
 solc-select  # Solidity compiler
 web3  # Ethereum interaction
 pytest  # Testing framework
+pytest-asyncio  # Async test support
 requests  # For API calls to partners
 pydantic  # Already in agentfield, but ensure
 python-gitlab  # GitLab API / MCP integration

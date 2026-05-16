@@ -22,6 +22,18 @@ class GitLabClient:
         self.gl = gitlab.Gitlab(self.url, private_token=self.token)
         self.project = self.gl.projects.get(self.project_id)
 
+    # -- Project creation --
+
+    def create_project(self, name: str, **kwargs) -> dict:
+        """Create a new GitLab project."""
+        project = self.gl.projects.create({"name": name, **kwargs})
+        return {
+            "id": project.id,
+            "name": project.name,
+            "web_url": project.web_url,
+            "default_branch": getattr(project, "default_branch", "main"),
+        }
+
     # -- Issues (workflow tracking) --
 
     def create_issue(self, title: str, description: str, labels: list[str] | None = None) -> dict:
@@ -99,6 +111,22 @@ class GitLabClient:
             {"id": p.id, "status": p.status, "ref": p.ref, "web_url": p.web_url}
             for p in pipelines
         ]
+
+    def merge_merge_request(self, mr_iid: int, **kwargs) -> dict:
+        """Accept/merge a merge request."""
+        mr = self.project.mergerequests.get(mr_iid)
+        result = mr.merge(**kwargs)
+        if isinstance(result, dict):
+            return {
+                "iid": result.get("iid", mr_iid),
+                "state": result.get("state", "merged"),
+                "merged": True,
+            }
+        return {
+            "iid": getattr(result, "iid", mr_iid),
+            "state": getattr(result, "state", "merged"),
+            "merged": True,
+        }
 
     # -- CI/CD Pipelines (testing & deployment) --
 
@@ -188,6 +216,69 @@ class GitLabClient:
         file.save(branch=branch, commit_message=commit_message)
         return {"file_path": file_path, "branch": branch}
 
+    def read_file(self, file_path: str, ref: str = "main") -> str:
+        """Read a file's decoded content from the repository."""
+        f = self.project.files.get(file_path=file_path, ref=ref)
+        return f.decode().decode("utf-8")
+
+    def delete_file(
+        self,
+        file_path: str,
+        branch: str,
+        commit_message: str,
+    ) -> dict:
+        """Delete a file from the repository."""
+        f = self.project.files.get(file_path=file_path, ref=branch)
+        f.delete(commit_message=commit_message, branch=branch)
+        return {"file_path": file_path, "branch": branch, "deleted": True}
+
+    def delete_branch(self, branch_name: str) -> dict:
+        """Delete a branch from the repository."""
+        branch = self.project.branches.get(branch_name)
+        branch.delete()
+        return {"branch": branch_name, "deleted": True}
+
+    def list_branches(self, search: str | None = None) -> list[dict]:
+        """List branches in the project."""
+        kwargs = {}
+        if search:
+            kwargs["search"] = search
+        branches = self.project.branches.list(**kwargs)
+        return [{"name": b.name, "merged": getattr(b, "merged", None), "default": getattr(b, "default", False)} for b in branches]
+
+    def commit_files(
+        self,
+        branch: str,
+        commit_message: str,
+        actions: list[dict],
+    ) -> dict:
+        """Create a commit with multiple file actions.
+
+        Each action dict: {"action": "create"|"update"|"delete", "file_path": "...", "content": "..."}
+        """
+        result = self.project.commits.create({
+            "branch": branch,
+            "commit_message": commit_message,
+            "actions": actions,
+        })
+        return {
+            "id": result.id,
+            "short_id": result.short_id,
+            "title": result.title,
+            "web_url": getattr(result, "web_url", ""),
+        }
+
+    def get_repo_tree(self, path: str = "", ref: str = "main", recursive: bool = False) -> list[dict]:
+        """Get the repository file tree."""
+        items = self.project.repository_tree(path=path, ref=ref, recursive=recursive, get_all=True)
+        result = []
+        for item in items:
+            if isinstance(item, dict):
+                result.append({"name": item["name"], "path": item["path"], "type": item["type"]})
+            else:
+                result.append({"name": item.name, "path": item.path, "type": item.type})
+        return result
+
     # -- Labels --
 
     def search_labels(self, query: str) -> list[dict]:
@@ -200,4 +291,10 @@ class GitLabClient:
     def search_code(self, query: str, scope: str = "blobs") -> list[dict]:
         """Search for code snippets in the project."""
         results = self.project.search(scope, search=query)
-        return [{"id": r.id, "name": r.name, "path": getattr(r, "path", "")} for r in results]
+        out = []
+        for r in results:
+            if isinstance(r, dict):
+                out.append({"id": r.get("id", ""), "name": r.get("name", ""), "path": r.get("path", "")})
+            else:
+                out.append({"id": r.id, "name": r.name, "path": getattr(r, "path", "")})
+        return out
