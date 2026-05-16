@@ -52,6 +52,11 @@ def _make_mock_project():
     mock_pipeline_summary.web_url = "https://gitlab.com/project/-/pipelines/100"
     mock_mr.pipelines.list.return_value = [mock_pipeline_summary]
 
+    mock_merge_result = MagicMock()
+    mock_merge_result.iid = 7
+    mock_merge_result.state = "merged"
+    mock_mr.merge.return_value = mock_merge_result
+
     project.mergerequests.create.return_value = mock_mr
     project.mergerequests.get.return_value = mock_mr
 
@@ -79,7 +84,25 @@ def _make_mock_project():
     mock_branch = MagicMock()
     mock_branch.name = "feature-branch"
     mock_branch.web_url = "https://gitlab.com/project/-/tree/feature-branch"
+    mock_branch.merged = False
+    mock_branch.default = False
+
+    mock_main_branch = MagicMock()
+    mock_main_branch.name = "main"
+    mock_main_branch.merged = False
+    mock_main_branch.default = True
+
     project.branches.create.return_value = mock_branch
+    project.branches.get.return_value = mock_branch
+    project.branches.list.return_value = [mock_main_branch, mock_branch]
+
+    # -- Commits --
+    mock_commit = MagicMock()
+    mock_commit.id = "abc123def456"
+    mock_commit.short_id = "abc123de"
+    mock_commit.title = "Batch commit"
+    mock_commit.web_url = "https://gitlab.com/project/-/commit/abc123de"
+    project.commits.create.return_value = mock_commit
 
     # -- Files --
     mock_file = MagicMock()
@@ -121,6 +144,15 @@ def _make_client(mock_project):
     """Construct a GitLabClient with a fully mocked gitlab lib."""
     with patch("gitlab.Gitlab") as MockGitlab:
         mock_gl_instance = MagicMock()
+
+        # -- Project creation mock --
+        mock_new_project = MagicMock()
+        mock_new_project.id = 999
+        mock_new_project.name = "test-project"
+        mock_new_project.web_url = "https://gitlab.com/test-project"
+        mock_new_project.default_branch = "main"
+        mock_gl_instance.projects.create.return_value = mock_new_project
+
         mock_gl_instance.projects.get.return_value = mock_project
         MockGitlab.return_value = mock_gl_instance
 
@@ -378,3 +410,115 @@ class TestRepositoryTree:
         assert len(items) == 2
         assert items[0].type == "tree"
         assert items[1].type == "blob"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Project creation
+# ---------------------------------------------------------------------------
+
+class TestProjectCreation:
+    def test_create_project(self, client):
+        result = client.create_project("my-new-project")
+        assert result["id"] == 999
+        assert result["name"] == "test-project"
+        assert result["web_url"] == "https://gitlab.com/test-project"
+        client.gl.projects.create.assert_called_once_with({"name": "my-new-project"})
+
+    def test_create_project_with_kwargs(self, client):
+        client.create_project("my-project", description="A test project", visibility="private")
+        call_args = client.gl.projects.create.call_args[0][0]
+        assert call_args["name"] == "my-project"
+        assert call_args["description"] == "A test project"
+        assert call_args["visibility"] == "private"
+
+
+# ---------------------------------------------------------------------------
+# Tests: New repository operations
+# ---------------------------------------------------------------------------
+
+class TestNewRepositoryOps:
+    def test_read_file(self, client):
+        content = client.read_file("contracts/Token.sol", ref="main")
+        client.project.files.get.assert_called_with(
+            file_path="contracts/Token.sol", ref="main"
+        )
+        assert content == "decoded content"
+
+    def test_read_file_default_ref(self, client):
+        client.read_file("README.md")
+        client.project.files.get.assert_called_with(
+            file_path="README.md", ref="main"
+        )
+
+    def test_delete_file(self, client):
+        result = client.delete_file("old.sol", "main", "Remove old contract")
+        assert result["file_path"] == "old.sol"
+        assert result["branch"] == "main"
+        assert result["deleted"] is True
+        f = client.project.files.get.return_value
+        f.delete.assert_called_once_with(
+            commit_message="Remove old contract", branch="main"
+        )
+
+    def test_delete_branch(self, client):
+        result = client.delete_branch("feature-branch")
+        assert result["branch"] == "feature-branch"
+        assert result["deleted"] is True
+        client.project.branches.get.assert_called_once_with("feature-branch")
+
+    def test_list_branches(self, client):
+        result = client.list_branches()
+        assert len(result) == 2
+        assert result[0]["name"] == "main"
+        assert result[0]["default"] is True
+        assert result[1]["name"] == "feature-branch"
+
+    def test_list_branches_with_search(self, client):
+        client.list_branches(search="feature")
+        client.project.branches.list.assert_called_once_with(search="feature")
+
+    def test_commit_files(self, client):
+        actions = [
+            {"action": "create", "file_path": "a.sol", "content": "code a"},
+            {"action": "create", "file_path": "b.sol", "content": "code b"},
+        ]
+        result = client.commit_files("main", "Add contracts", actions)
+        assert result["short_id"] == "abc123de"
+        assert result["title"] == "Batch commit"
+        client.project.commits.create.assert_called_once_with({
+            "branch": "main",
+            "commit_message": "Add contracts",
+            "actions": actions,
+        })
+
+    def test_get_repo_tree(self, client):
+        result = client.get_repo_tree(ref="main", recursive=True)
+        assert len(result) == 2
+        assert result[0]["name"] == "contracts"
+        assert result[0]["type"] == "tree"
+        assert result[1]["name"] == "DeFiYieldToken.sol"
+        assert result[1]["type"] == "blob"
+
+    def test_get_repo_tree_with_path(self, client):
+        client.get_repo_tree(path="contracts", ref="main")
+        client.project.repository_tree.assert_called_with(
+            path="contracts", ref="main", recursive=False, get_all=True
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Merge MR
+# ---------------------------------------------------------------------------
+
+class TestMergeMR:
+    def test_merge_merge_request(self, client):
+        result = client.merge_merge_request(7)
+        assert result["merged"] is True
+        assert result["state"] == "merged"
+        mr = client.project.mergerequests.get.return_value
+        mr.merge.assert_called_once()
+
+    def test_merge_merge_request_with_kwargs(self, client):
+        client.merge_merge_request(7, should_remove_source_branch=True)
+        mr = client.project.mergerequests.get.return_value
+        mr.merge.assert_called_once_with(should_remove_source_branch=True)
