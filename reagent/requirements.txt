@@ -7,6 +7,9 @@ requests  # For API calls to partners
 pydantic  # Already in agentfield, but ensure
 python-gitlab  # GitLab API / MCP integration
 python-dotenv  # Environment variable loading
+cryptography>=41.0.0  # Token encryption for GitHub integration
+PyGithub>=2.1.1  # GitHub API client
+aiohttp>=3.9.0  # Async HTTP for GitHub API
 # Placeholder for partner SDKs (assume available via LiteLLM or direct APIs)
 # qwen-cloud
 # brightdata
