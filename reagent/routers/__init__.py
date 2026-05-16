@@ -5,6 +5,7 @@ from .ideation_router import ideation_router
 from .monitoring_router import monitoring_router
 from .orchestrator_router import orchestrator_router
 from .testing_router import testing_router
+from .nosana_router import nosana_router
 
 __all__ = [
     "auditing_router",
@@ -14,4 +15,5 @@ __all__ = [
     "monitoring_router",
     "orchestrator_router",
     "testing_router",
+    "nosana_router",
 ]

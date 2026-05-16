@@ -26,20 +26,29 @@ class ContractCode(BaseModel):
 
 
 @coding_router.reasoner(tags=["ai", "qwen", "qoder"])
-async def generate_contract_code(spec: dict) -> dict:
+async def generate_contract_code(spec: dict, recovery_context: str | None = None) -> dict:
     """
     Generate smart contract code from specification using Qwen Cloud.
     Pushes code to a GitLab branch via FileManager and creates an MR.
     Falls back to local file write if FileManager is not available.
+    
+    Args:
+        spec: Contract specification dictionary
+        recovery_context: Optional context from previous failed attempts to guide improvements
     """
     fm = _get_fm()
     contract_name = spec.get("name", "Contract")
     branch_name = f"reagent/{contract_name.lower().replace(' ', '-')}"
 
+    # Build prompt with recovery context if provided
+    prompt = f"Specification: {spec}\nGenerate Solidity code, tests, and deployment script."
+    if recovery_context:
+        prompt += f"\n\nPrevious attempt had issues:\n{recovery_context}\nPlease address these issues in the new implementation."
+
     # Use Qwen for code generation
     code = await coding_router.ai(
         system="You are an expert Solidity developer. Generate production-ready smart contract code with security best practices.",
-        user=f"Specification: {spec}\nGenerate Solidity code, tests, and deployment script.",
+        user=prompt,
         schema=ContractCode,
     )
 

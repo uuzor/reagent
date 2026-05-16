@@ -22,6 +22,7 @@ from routers import (
     monitoring_router,
     orchestrator_router,
 )
+from routers.nosana_router import nosana_router
 
 # Load local environment values from .env for development/runtime convenience.
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -122,6 +123,7 @@ app.include_router(auditing_router)
 app.include_router(deployment_router)
 app.include_router(monitoring_router)
 app.include_router(orchestrator_router)
+app.include_router(nosana_router)
 
 if __name__ == "__main__":
     # app.run() auto-detects CLI vs server mode (sdk/python/agentfield/agent.py:4194).

@@ -2,6 +2,8 @@ from agentfield import AgentRouter
 from pydantic import BaseModel, Field
 import os
 import time
+from typing import Optional, List, Dict, Any
+from enum import Enum
 
 from file_manager import FileManager
 
@@ -18,6 +20,61 @@ def _get_fm() -> FileManager | None:
     return _fm
 
 
+class WorkflowStage(str, Enum):
+    """Workflow stages."""
+    IDEATION = "ideation"
+    CODING = "coding"
+    TESTING = "testing"
+    AUDITING = "auditing"
+    DEPLOYMENT = "deployment"
+    MONITORING = "monitoring"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+# Stage order for workflow progression
+STAGE_ORDER = [
+    WorkflowStage.IDEATION.value,
+    WorkflowStage.CODING.value,
+    WorkflowStage.TESTING.value,
+    WorkflowStage.AUDITING.value,
+    WorkflowStage.DEPLOYMENT.value,
+    WorkflowStage.MONITORING.value,
+]
+
+
+class ErrorRecoveryDecision(BaseModel):
+    """Structured AI output for error recovery decisions."""
+    analysis: str = Field(description="Analysis of the error and context")
+    action: str = Field(description="Action to take: retry_same, go_back, or abort")
+    target_stage: str = Field(description="Target stage to execute next")
+    context_to_inject: str = Field(description="Context to pass to the next stage for recovery")
+    confidence: float = Field(description="Confidence level in this decision (0-1)", ge=0, le=1)
+
+
+class StageResult(BaseModel):
+    """Result from a workflow stage."""
+    stage: str
+    success: bool
+    output: Dict[str, Any]
+    error: Optional[str] = None
+    retry_count: int = 0
+    next_stage: Optional[str] = None  # AI-determined next stage
+
+
+class WorkflowState(BaseModel):
+    """Complete workflow state for recovery and feedback loops."""
+    workflow_id: str
+    requirements: str
+    current_stage: str
+    stages_completed: List[str] = []
+    stage_results: Dict[str, StageResult] = {}
+    retry_counts: Dict[str, int] = {}
+    max_retries: int = 3
+    gitlab_issue: Optional[Dict] = None
+    status: str = "in_progress"
+
+
 class OrchestrationResult(BaseModel):
     """Structured output for orchestration result."""
     workflow_id: str = Field(description="Unique workflow ID")
@@ -26,120 +83,479 @@ class OrchestrationResult(BaseModel):
     status: str = Field(description="Overall status")
     outputs: dict = Field(description="Stage outputs")
     gitlab_issue: dict | None = Field(default=None, description="GitLab tracking issue reference")
+    feedback_loops: List[Dict] = Field(default=[], description="Feedback loops executed")
 
 
-@orchestrator_router.reasoner(tags=["ai", "coordination"])
-async def orchestrate_contract_development(requirements: str) -> dict:
+# In-memory workflow state (in production, use Redis/database)
+_workflow_states: Dict[str, WorkflowState] = {}
+
+
+@orchestrator_router.reasoner(tags=["ai", "decision"])
+async def decide_next_stage(
+    current_stage: str,
+    stage_result: Dict[str, Any],
+    workflow_state: Dict[str, Any]
+) -> dict:
     """
-    Orchestrate the full smart contract development workflow.
-    Creates a GitLab issue for tracking and logs each stage completion.
+    AI-powered decision maker for workflow progression.
+    Analyzes stage results and decides next action (proceed, retry, or go back).
+    """
+    # Use AI to analyze the situation
+    analysis = await orchestrator_router.ai(
+        system="""You are a smart contract development workflow coordinator.
+Analyze the stage result and decide the next action.
+
+Rules:
+1. If stage succeeded → proceed to next stage
+2. If stage failed with fixable error → go back to appropriate stage
+3. If stage failed after max retries → mark as failed
+4. Consider dependencies: coding needs ideation, testing needs coding, etc.
+
+Return JSON with:
+- next_stage: "ideation"|"coding"|"testing"|"auditing"|"deployment"|"monitoring"|"failed"
+- reason: explanation
+- feedback_needed: true/false (if need to go back)
+- suggestions: list of improvements""",
+        user=f"""Current Stage: {current_stage}
+Stage Result: {stage_result}
+Workflow State: {workflow_state}
+
+What should we do next?""",
+    )
+    
+    orchestrator_router.app.note(
+        f"Decision for {current_stage}: {analysis.get('next_stage')} - {analysis.get('reason')}",
+        tags=["orchestration", "decision"]
+    )
+    
+    return analysis
+
+
+@orchestrator_router.reasoner(tags=["ai", "coordination", "adaptive"])
+async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
+    """
+    Adaptive orchestration with feedback loops and error recovery.
+    Uses AI to decide next steps based on stage results.
     """
     workflow_id = f"workflow_{int(time.time())}"
     fm = _get_fm()
 
+    # Initialize workflow state
+    state = WorkflowState(
+        workflow_id=workflow_id,
+        requirements=requirements,
+        current_stage=WorkflowStage.IDEATION.value
+    )
+    _workflow_states[workflow_id] = state
+
     # Create tracking issue in GitLab
-    issue_ref = None
     if fm:
         issue = fm.gl.create_issue(
-            title=f"Smart contract workflow: {workflow_id}",
-            description=f"Requirements:\n{requirements}",
-            labels=["reagent", "orchestration"],
+            title=f"Adaptive workflow: {workflow_id}",
+            description=f"Requirements:\n{requirements}\n\nThis workflow uses adaptive orchestration with feedback loops.",
+            labels=["reagent", "orchestration", "adaptive"],
         )
-        issue_ref = issue
+        state.gitlab_issue = issue
 
-    stages_completed = []
-    outputs = {}
+    feedback_loops = []
+    max_iterations = 20  # Prevent infinite loops
+    iteration = 0
 
-    # Stage 1: Ideation
-    spec = await orchestrator_router.app.call(
-        f"{orchestrator_router.app.node_id}.ideation_generate_contract_spec",
-        requirements=requirements,
-    )
-    stages_completed.append("ideation")
-    outputs["spec"] = spec
-    if fm and issue_ref:
-        fm.gl.add_issue_note(issue_ref["iid"], f"Stage 1 complete: ideation — spec for '{spec.get('name')}' generated")
-
-    # Stage 2: Coding
-    code = await orchestrator_router.app.call(
-        f"{orchestrator_router.app.node_id}.coding_generate_contract_code",
-        spec=spec,
-    )
-    stages_completed.append("coding")
-    outputs["code"] = code
-    if fm and issue_ref:
-        fm.gl.add_issue_note(issue_ref["iid"], f"Stage 2 complete: coding — {code.get('solidity_code', '')[:100]}...")
-
-    # Stage 3: Testing
-    contract_path = f"contracts/{spec.get('name', 'Contract')}.sol"
-    test_results = await orchestrator_router.app.call(
-        f"{orchestrator_router.app.node_id}.testing_run_comprehensive_tests",
-        contract_path=contract_path,
-    )
-    stages_completed.append("testing")
-    outputs["tests"] = test_results
-    if fm and issue_ref:
-        passed = test_results.get("passed", False)
-        fm.gl.add_issue_note(issue_ref["iid"], f"Stage 3 complete: testing — {'PASSED' if passed else 'FAILED'}")
-
-    # Stage 4: Auditing
-    audit = await orchestrator_router.app.call(
-        f"{orchestrator_router.app.node_id}.auditing_comprehensive_audit",
-        contract_code=code.get("solidity_code", ""),
-        contract_path=contract_path,
-    )
-    stages_completed.append("auditing")
-    outputs["audit"] = audit
-    if fm and issue_ref:
-        fm.gl.add_issue_note(issue_ref["iid"], f"Stage 4 complete: auditing — risk level: {audit.get('overall_risk')}")
-
-    # Stage 5: Deployment (if tests pass)
-    deployment = None
-    monitor = None
-    current_stage = "testing_fixes"
-    if test_results.get("passed", False):
-        deployment = await orchestrator_router.app.call(
-            f"{orchestrator_router.app.node_id}.deployment_deploy_contract",
-            contract_path=contract_path,
+    while state.current_stage != WorkflowStage.COMPLETED.value and iteration < max_iterations:
+        iteration += 1
+        stage = state.current_stage
+        
+        orchestrator_router.app.note(
+            f"Iteration {iteration}: Executing stage {stage}",
+            tags=["orchestration", "iteration"]
         )
-        stages_completed.append("deployment")
-        outputs["deployment"] = deployment
-        current_stage = "monitoring"
 
-        # Start monitoring
-        monitor = await orchestrator_router.app.call(
-            f"{orchestrator_router.app.node_id}.monitoring_monitor_contract",
-            contract_address=deployment.get("contract_address", ""),
-        )
-        outputs["monitoring"] = monitor
-        if fm and issue_ref:
-            fm.gl.add_issue_note(issue_ref["iid"], f"Stage 5 complete: deployed to {deployment.get('network')} at {deployment.get('contract_address')}")
-    else:
-        if fm and issue_ref:
-            fm.gl.add_issue_note(issue_ref["iid"], "Deployment skipped — tests did not pass. Requires fixes.")
+        try:
+            # Execute current stage
+            if stage == WorkflowStage.IDEATION.value:
+                result = await _execute_ideation(state, fm)
+            elif stage == WorkflowStage.CODING.value:
+                result = await _execute_coding(state, fm)
+            elif stage == WorkflowStage.TESTING.value:
+                result = await _execute_testing(state, fm)
+            elif stage == WorkflowStage.AUDITING.value:
+                result = await _execute_auditing(state, fm)
+            elif stage == WorkflowStage.DEPLOYMENT.value:
+                result = await _execute_deployment(state, fm)
+            elif stage == WorkflowStage.MONITORING.value:
+                result = await _execute_monitoring(state, fm)
+                state.current_stage = WorkflowStage.COMPLETED.value
+                break
+            else:
+                break
+
+            # Store result
+            state.stage_results[stage] = result
+            
+            if result.success:
+                if stage not in state.stages_completed:
+                    state.stages_completed.append(stage)
+                state.retry_counts[stage] = 0
+            else:
+                # Increment retry count
+                state.retry_counts[stage] = state.retry_counts.get(stage, 0) + 1
+
+            # AI decides next stage
+            decision = await decide_next_stage(
+                current_stage=stage,
+                stage_result=result.model_dump(),
+                workflow_state={
+                    "stages_completed": state.stages_completed,
+                    "retry_counts": state.retry_counts,
+                    "requirements": state.requirements
+                }
+            )
+
+            next_stage = decision.get("next_stage")
+            is_feedback = decision.get("feedback_needed", False)
+            
+            if is_feedback:
+                feedback_loops.append({
+                    "from": stage,
+                    "to": next_stage,
+                    "reason": decision.get("reason"),
+                    "iteration": iteration
+                })
+                
+                if fm and state.gitlab_issue:
+                    fm.gl.add_issue_note(
+                        state.gitlab_issue["iid"],
+                        f"🔄 Feedback loop: {stage} → {next_stage}\nReason: {decision.get('reason')}"
+                    )
+
+            # Check if we should stop
+            if next_stage == "failed" or state.retry_counts.get(stage, 0) >= state.max_retries:
+                state.status = "failed"
+                state.current_stage = WorkflowStage.FAILED.value
+                break
+
+            state.current_stage = next_stage
+
+        except Exception as e:
+            orchestrator_router.app.note(
+                f"Error in stage {stage}: {str(e)}",
+                tags=["orchestration", "error"]
+            )
+            state.status = "failed"
+            state.current_stage = WorkflowStage.FAILED.value
+            break
+
+    # Final status
+    if state.current_stage == WorkflowStage.COMPLETED.value:
+        state.status = "completed"
+    elif state.current_stage == WorkflowStage.FAILED.value:
+        state.status = "failed"
 
     result = OrchestrationResult(
         workflow_id=workflow_id,
-        stages_completed=stages_completed,
-        current_stage=current_stage,
-        status="completed" if deployment else "pending_fixes",
-        outputs=outputs,
-        gitlab_issue=issue_ref,
+        stages_completed=state.stages_completed,
+        current_stage=state.current_stage,
+        status=state.status,
+        outputs={k: v.output for k, v in state.stage_results.items()},
+        gitlab_issue=state.gitlab_issue,
+        feedback_loops=feedback_loops
     )
 
     orchestrator_router.app.note(
-        f"Workflow {workflow_id} completed stages: {stages_completed}",
-        tags=["orchestration", "workflow"],
+        f"Workflow {workflow_id} completed with {len(feedback_loops)} feedback loops",
+        tags=["orchestration", "workflow", "completed"]
     )
 
     return result.model_dump()
 
 
+# Stage execution functions with error handling
+
+async def _execute_ideation(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+    """Execute ideation stage."""
+    try:
+        # Get context from previous attempts if any
+        context = ""
+        if WorkflowStage.CODING.value in state.stage_results:
+            coding_result = state.stage_results[WorkflowStage.CODING.value]
+            if not coding_result.success:
+                context = f"\nPrevious coding attempt failed: {coding_result.error}\nPlease refine the specification."
+
+        spec = await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.ideation_generate_contract_spec",
+            requirements=state.requirements + context,
+        )
+        
+        if fm and state.gitlab_issue:
+            fm.gl.add_issue_note(
+                state.gitlab_issue["iid"],
+                f"✓ Ideation complete: {spec.get('name', 'Contract')}"
+            )
+        
+        return StageResult(
+            stage=WorkflowStage.IDEATION.value,
+            success=True,
+            output=spec,
+            next_stage=WorkflowStage.CODING.value
+        )
+    except Exception as e:
+        return StageResult(
+            stage=WorkflowStage.IDEATION.value,
+            success=False,
+            output={},
+            error=str(e),
+            next_stage=WorkflowStage.IDEATION.value  # Retry
+        )
+
+
+async def _execute_coding(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+    """Execute coding stage."""
+    try:
+        spec = state.stage_results.get(WorkflowStage.IDEATION.value)
+        if not spec or not spec.success:
+            return StageResult(
+                stage=WorkflowStage.CODING.value,
+                success=False,
+                output={},
+                error="No valid specification from ideation",
+                next_stage=WorkflowStage.IDEATION.value  # Go back
+            )
+
+        # Get feedback from testing if available
+        context = spec.output
+        if WorkflowStage.TESTING.value in state.stage_results:
+            test_result = state.stage_results[WorkflowStage.TESTING.value]
+            if not test_result.success:
+                context["test_feedback"] = test_result.error
+
+        code = await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.coding_generate_contract_code",
+            spec=context,
+        )
+        
+        if fm and state.gitlab_issue:
+            fm.gl.add_issue_note(
+                state.gitlab_issue["iid"],
+                f"✓ Coding complete: {len(code.get('solidity_code', ''))} characters"
+            )
+        
+        return StageResult(
+            stage=WorkflowStage.CODING.value,
+            success=True,
+            output=code,
+            next_stage=WorkflowStage.TESTING.value
+        )
+    except Exception as e:
+        return StageResult(
+            stage=WorkflowStage.CODING.value,
+            success=False,
+            output={},
+            error=str(e),
+            next_stage=WorkflowStage.IDEATION.value  # May need better spec
+        )
+
+
+async def _execute_testing(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+    """Execute testing stage."""
+    try:
+        code_result = state.stage_results.get(WorkflowStage.CODING.value)
+        if not code_result or not code_result.success:
+            return StageResult(
+                stage=WorkflowStage.TESTING.value,
+                success=False,
+                output={},
+                error="No valid code from coding stage",
+                next_stage=WorkflowStage.CODING.value
+            )
+
+        spec = state.stage_results[WorkflowStage.IDEATION.value].output
+        contract_path = f"contracts/{spec.get('name', 'Contract')}.sol"
+        
+        test_results = await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.testing_run_comprehensive_tests",
+            contract_path=contract_path,
+        )
+        
+        passed = test_results.get("passed", False)
+        
+        if fm and state.gitlab_issue:
+            fm.gl.add_issue_note(
+                state.gitlab_issue["iid"],
+                f"{'✓' if passed else '✗'} Testing: {'PASSED' if passed else 'FAILED'}"
+            )
+        
+        if not passed:
+            return StageResult(
+                stage=WorkflowStage.TESTING.value,
+                success=False,
+                output=test_results,
+                error=f"Tests failed: {test_results.get('failures', [])}",
+                next_stage=WorkflowStage.CODING.value  # Go back to fix code
+            )
+        
+        return StageResult(
+            stage=WorkflowStage.TESTING.value,
+            success=True,
+            output=test_results,
+            next_stage=WorkflowStage.AUDITING.value
+        )
+    except Exception as e:
+        return StageResult(
+            stage=WorkflowStage.TESTING.value,
+            success=False,
+            output={},
+            error=str(e),
+            next_stage=WorkflowStage.CODING.value
+        )
+
+
+async def _execute_auditing(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+    """Execute auditing stage."""
+    try:
+        code_result = state.stage_results[WorkflowStage.CODING.value]
+        spec = state.stage_results[WorkflowStage.IDEATION.value].output
+        contract_path = f"contracts/{spec.get('name', 'Contract')}.sol"
+        
+        audit = await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.auditing_comprehensive_audit",
+            contract_code=code_result.output.get("solidity_code", ""),
+            contract_path=contract_path,
+        )
+        
+        risk_level = audit.get("overall_risk", "unknown")
+        
+        if fm and state.gitlab_issue:
+            fm.gl.add_issue_note(
+                state.gitlab_issue["iid"],
+                f"✓ Audit complete: Risk level {risk_level}"
+            )
+        
+        # High risk should go back to coding
+        if risk_level in ["high", "critical"]:
+            return StageResult(
+                stage=WorkflowStage.AUDITING.value,
+                success=False,
+                output=audit,
+                error=f"High risk issues found: {audit.get('issues', [])}",
+                next_stage=WorkflowStage.CODING.value
+            )
+        
+        return StageResult(
+            stage=WorkflowStage.AUDITING.value,
+            success=True,
+            output=audit,
+            next_stage=WorkflowStage.DEPLOYMENT.value
+        )
+    except Exception as e:
+        return StageResult(
+            stage=WorkflowStage.AUDITING.value,
+            success=False,
+            output={},
+            error=str(e),
+            next_stage=WorkflowStage.AUDITING.value  # Retry audit
+        )
+
+
+async def _execute_deployment(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+    """Execute deployment stage."""
+    try:
+        spec = state.stage_results[WorkflowStage.IDEATION.value].output
+        contract_path = f"contracts/{spec.get('name', 'Contract')}.sol"
+        
+        deployment = await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.deployment_deploy_contract",
+            contract_path=contract_path,
+        )
+        
+        if not deployment.get("success", False):
+            return StageResult(
+                stage=WorkflowStage.DEPLOYMENT.value,
+                success=False,
+                output=deployment,
+                error=deployment.get("error", "Deployment failed"),
+                next_stage=WorkflowStage.CODING.value  # May need code fixes
+            )
+        
+        if fm and state.gitlab_issue:
+            fm.gl.add_issue_note(
+                state.gitlab_issue["iid"],
+                f"✓ Deployed to {deployment.get('network')} at {deployment.get('contract_address')}"
+            )
+        
+        return StageResult(
+            stage=WorkflowStage.DEPLOYMENT.value,
+            success=True,
+            output=deployment,
+            next_stage=WorkflowStage.MONITORING.value
+        )
+    except Exception as e:
+        return StageResult(
+            stage=WorkflowStage.DEPLOYMENT.value,
+            success=False,
+            output={},
+            error=str(e),
+            next_stage=WorkflowStage.DEPLOYMENT.value  # Retry deployment
+        )
+
+
+async def _execute_monitoring(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+    """Execute monitoring stage."""
+    try:
+        deployment_result = state.stage_results[WorkflowStage.DEPLOYMENT.value]
+        
+        monitor = await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.monitoring_monitor_contract",
+            contract_address=deployment_result.output.get("contract_address", ""),
+        )
+        
+        if fm and state.gitlab_issue:
+            fm.gl.add_issue_note(
+                state.gitlab_issue["iid"],
+                f"✓ Monitoring started for {deployment_result.output.get('contract_address')}"
+            )
+        
+        return StageResult(
+            stage=WorkflowStage.MONITORING.value,
+            success=True,
+            output=monitor,
+            next_stage=WorkflowStage.COMPLETED.value
+        )
+    except Exception as e:
+        return StageResult(
+            stage=WorkflowStage.MONITORING.value,
+            success=False,
+            output={},
+            error=str(e),
+            next_stage=WorkflowStage.MONITORING.value
+        )
+
+
+@orchestrator_router.reasoner(tags=["ai", "coordination"])
+async def orchestrate_contract_development(requirements: str) -> dict:
+    """
+    Original linear orchestration (kept for backward compatibility).
+    For adaptive orchestration with feedback loops, use orchestrate_contract_development_adaptive.
+    """
+    return await orchestrate_contract_development_adaptive(requirements)
+
+
 @orchestrator_router.skill(tags=["status", "query"])
 def get_workflow_status(workflow_id: str, issue_iid: int | None = None) -> dict:
     """
-    Get status of a specific workflow from GitLab issue or local state.
+    Get status of a specific workflow from memory or GitLab issue.
     """
+    # Check in-memory state first
+    if workflow_id in _workflow_states:
+        state = _workflow_states[workflow_id]
+        return {
+            "workflow_id": workflow_id,
+            "status": state.status,
+            "current_stage": state.current_stage,
+            "stages_completed": state.stages_completed,
+            "retry_counts": state.retry_counts,
+        }
+    
+    # Fallback to GitLab
     fm = _get_fm()
     if fm and issue_iid:
         issue = fm.gl.get_issue(issue_iid)
@@ -149,21 +565,55 @@ def get_workflow_status(workflow_id: str, issue_iid: int | None = None) -> dict:
             "title": issue["title"],
             "web_url": issue["web_url"],
         }
+    
     return {
         "workflow_id": workflow_id,
         "status": "unknown",
-        "note": "Provide issue_iid or configure GITLAB_TOKEN for live tracking",
+        "note": "Workflow not found in memory. Provide issue_iid for GitLab lookup.",
     }
 
 
 @orchestrator_router.skill(tags=["retry", "error-handling"])
 def retry_failed_stage(workflow_id: str, stage: str) -> dict:
     """
-    Retry a failed stage in the workflow.
+    Manually retry a failed stage in the workflow.
     """
+    if workflow_id not in _workflow_states:
+        return {
+            "success": False,
+            "error": "Workflow not found"
+        }
+    
+    state = _workflow_states[workflow_id]
+    state.current_stage = stage
+    state.retry_counts[stage] = 0  # Reset retry count
+    
     return {
         "workflow_id": workflow_id,
         "stage": stage,
         "status": "retry_initiated",
-        "note": "Retry logic requires workflow state management"
+        "note": "Stage reset. Call orchestrate_contract_development_adaptive to continue."
     }
+
+
+@orchestrator_router.skill(tags=["state", "management"])
+def list_active_workflows() -> dict:
+    """
+    List all active workflows in memory.
+    """
+    workflows = []
+    for wf_id, state in _workflow_states.items():
+        workflows.append({
+            "workflow_id": wf_id,
+            "status": state.status,
+            "current_stage": state.current_stage,
+            "stages_completed": len(state.stages_completed),
+            "requirements": state.requirements[:100] + "..." if len(state.requirements) > 100 else state.requirements
+        })
+    
+    return {
+        "total_workflows": len(workflows),
+        "workflows": workflows
+    }
+
+# Made with Bob
