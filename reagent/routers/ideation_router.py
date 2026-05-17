@@ -7,6 +7,7 @@ from pathlib import Path
 # Add parent directory to path to import bright_data_client
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from bright_data_client import BrightDataClient
+from context import AgentContext
 
 # Router for ideation and research
 ideation_router = AgentRouter(prefix="ideation", tags=["research", "ideation"])
@@ -33,14 +34,15 @@ class ContractSpec(BaseModel):
 
 
 @ideation_router.reasoner(tags=["ai", "qwen", "brightdata"])
-async def generate_contract_spec(requirements: str, recovery_context: str | None = None) -> dict:
+async def generate_contract_spec(requirements: str, recovery_context: str | None = None, context: dict | None = None) -> dict:
     """
     Generate smart contract specification from requirements using AI reasoning.
     Integrates real market research via Bright Data web scraping.
-    
+
     Args:
         requirements: User requirements for the contract
         recovery_context: Optional context from downstream failures to refine the specification
+        context: Structured AgentContext dict for mind building across stages
     """
     bd = _get_bright_data()
     
@@ -63,6 +65,13 @@ Key Insights:
     prompt = f"Requirements: {requirements}\n\nMarket Intelligence:\n{market_data}\n\nGenerate a structured contract specification that incorporates current market trends and best practices."
     if recovery_context:
         prompt += f"\n\nPrevious specification led to issues:\n{recovery_context}\nPlease refine the specification to address these concerns."
+
+    # Inject structured context (mind building)
+    if context:
+        ctx = AgentContext.from_dict(context) if isinstance(context, dict) else context
+        context_prompt = ctx.build_injection_prompt()
+        if context_prompt:
+            prompt += f"\n\n{context_prompt}"
 
     # Use AI for deep reasoning with real market context
     spec = await ideation_router.ai(

@@ -8,6 +8,7 @@ from pathlib import Path
 # Add parent directory to path to import bright_data_client
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from bright_data_client import BrightDataClient
+from context import AgentContext
 
 # Router for monitoring and alerts
 monitoring_router = AgentRouter(prefix="monitoring", tags=["monitoring", "alerts"])
@@ -33,10 +34,15 @@ class MonitoringReport(BaseModel):
 
 
 @monitoring_router.reasoner(tags=["ai", "analysis", "brightdata"])
-async def monitor_contract(contract_address: str, network: str = "mainnet") -> dict:
+async def monitor_contract(contract_address: str, network: str = "mainnet", context: dict | None = None) -> dict:
     """
     Monitor deployed contract using Bright Data for real on-chain data scraping.
     Scrapes Etherscan for contract events, transactions, and activity.
+
+    Args:
+        contract_address: Deployed contract address
+        network: Blockchain network
+        context: Structured AgentContext dict for mind building across stages
     """
     bd = _get_bright_data()
     
@@ -62,9 +68,16 @@ async def monitor_contract(contract_address: str, network: str = "mainnet") -> d
         alerts.append("Contract is active and monitored")
     
     # Use AI to analyze the scraped data
+    user_prompt = f"Contract: {contract_address}\nNetwork: {network}\nData: {contract_data}\nGas Prices: {gas_prices}"
+    if context:
+        ctx = AgentContext.from_dict(context) if isinstance(context, dict) else context
+        context_prompt = ctx.build_injection_prompt()
+        if context_prompt:
+            user_prompt += f"\n\n{context_prompt}"
+
     analysis = await monitoring_router.ai(
         system="You are a blockchain monitoring expert. Analyze this contract activity and provide insights.",
-        user=f"Contract: {contract_address}\nNetwork: {network}\nData: {contract_data}\nGas Prices: {gas_prices}",
+        user=user_prompt,
     )
     
     report = MonitoringReport(

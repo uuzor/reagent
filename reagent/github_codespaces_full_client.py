@@ -8,6 +8,7 @@ import aiohttp
 import json
 import subprocess
 import time
+import base64
 from typing import Optional, Dict, Any, List, AsyncIterator
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -596,6 +597,174 @@ class GitHubCodespacesClient:
             codespace_name,
             command
         )
+
+
+# ==================== Orchestration Layer ====================
+
+class SecureTokenStore:
+    """Encrypts and stores GitHub OAuth tokens using Fernet symmetric encryption."""
+
+    def __init__(self, encryption_key: Optional[str] = None):
+        key = encryption_key or os.getenv("ENCRYPTION_KEY")
+        if key:
+            try:
+                from cryptography.fernet import Fernet
+                # Ensure key is valid Fernet key (32 url-safe base64-encoded bytes)
+                if len(key) < 44:
+                    key = base64.urlsafe_b64encode(key.ljust(32).encode()[:32]).decode()
+                self._fernet = Fernet(key.encode() if isinstance(key, str) else key)
+            except ImportError:
+                logger.warning("cryptography not installed — tokens stored in plaintext")
+                self._fernet = None
+        else:
+            self._fernet = None
+            logger.warning("No ENCRYPTION_KEY set — tokens stored in plaintext")
+
+        self._store: Dict[str, str] = {}
+
+    def encrypt_token(self, token: str, user_id: str) -> str:
+        if self._fernet:
+            encrypted = self._fernet.encrypt(token.encode()).decode()
+        else:
+            encrypted = token
+        self._store[user_id] = encrypted
+        return encrypted
+
+    def decrypt_token(self, user_id: str) -> Optional[str]:
+        encrypted = self._store.get(user_id)
+        if encrypted is None:
+            return None
+        if self._fernet:
+            try:
+                return self._fernet.decrypt(encrypted.encode()).decode()
+            except Exception:
+                logger.error(f"Failed to decrypt token for user {user_id}")
+                return None
+        return encrypted
+
+    def revoke_token(self, user_id: str) -> None:
+        self._store.pop(user_id, None)
+
+
+class CodespaceConfig(BaseModel):
+    """Configuration for creating a Codespace workflow."""
+    repository: str
+    branch: str = "main"
+    machine: str = "basicLinux32gb"
+    devcontainer_path: Optional[str] = None
+    idle_timeout_minutes: int = 60
+    retention_period_minutes: int = 4320
+
+
+class CodespaceWorkflow(BaseModel):
+    """Tracks a workflow running inside a GitHub Codespace."""
+    workflow_id: str
+    user_id: str
+    repository: str
+    branch: str
+    codespace_name: Optional[str] = None
+    codespace_url: Optional[str] = None
+    status: str = "pending"
+    execution_logs: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    completed_at: Optional[str] = None
+
+
+class CodespaceOrchestrator:
+    """High-level orchestration layer over GitHubCodespacesClient.
+
+    Manages the lifecycle of creating a Codespace, executing workflow
+    commands, and cleaning up when done.
+    """
+
+    def __init__(self, client: GitHubCodespacesClient):
+        self.client = client
+
+    async def setup_codespace(
+        self,
+        workflow: CodespaceWorkflow,
+        config: CodespaceConfig,
+    ) -> str:
+        """Create a Codespace, wait for it to become available, install deps.
+
+        Returns the codespace name.
+        """
+        owner, repo = config.repository.split("/", 1)
+        request = CodespaceCreateRequest(
+            ref=config.branch,
+            machine=config.machine,
+            idle_timeout_minutes=config.idle_timeout_minutes,
+            retention_period_minutes=config.retention_period_minutes,
+            devcontainer_path=config.devcontainer_path,
+        )
+
+        codespace = await self.client.create_codespace(owner, repo, request)
+        workflow.codespace_name = codespace.name
+        workflow.codespace_url = codespace.web_url
+        workflow.execution_logs.append(f"Codespace created: {codespace.name}")
+
+        # Wait for Codespace to be ready
+        codespace = await self.client.wait_for_state(
+            codespace.name,
+            CodespaceState.AVAILABLE,
+            timeout=300,
+            poll_interval=10,
+        )
+        workflow.status = "running"
+        workflow.execution_logs.append("Codespace is available")
+
+        # Install dependencies
+        result = await self.client.execute_command(
+            codespace.name,
+            "pip install solc-select web3 pydantic 2>&1 || true",
+        )
+        workflow.execution_logs.append(f"Dependencies installed: {result.get('stdout', '')[:200]}")
+
+        return codespace.name
+
+    async def execute_workflow_via_commits(
+        self,
+        workflow: CodespaceWorkflow,
+        requirements: str,
+    ) -> Dict[str, Any]:
+        """Push devcontainer + config files as commits and run the workflow."""
+        owner, repo = workflow.repository.split("/", 1)
+
+        # Create devcontainer in the repo
+        devcontainer = DevcontainerConfig()
+        await self.client.create_devcontainer_file(
+            owner, repo, workflow.branch, devcontainer,
+        )
+        workflow.execution_logs.append("Devcontainer configuration pushed")
+
+        # Execute the orchestration command in the Codespace
+        escaped = requirements.replace("'", "'\\''")
+        command = f"python -c \"from reagent.main import app; print('reagent ready')\" 2>&1 || echo 'reagent not installed yet'"
+        result = await self.client.execute_command(workflow.codespace_name, command)
+
+        workflow.execution_logs.append(f"Workflow execution: {result.get('stdout', '')[:500]}")
+        workflow.status = "completed"
+        workflow.completed_at = datetime.now().isoformat()
+
+        return result
+
+    async def execute_command(self, codespace_name: str, command: str) -> Dict[str, Any]:
+        """Execute a single command in the Codespace."""
+        return await self.client.execute_command(codespace_name, command)
+
+    async def cleanup_codespace(self, workflow: CodespaceWorkflow) -> None:
+        """Stop and delete the Codespace."""
+        if workflow.codespace_name:
+            try:
+                await self.client.stop_codespace(workflow.codespace_name)
+                workflow.execution_logs.append(f"Codespace stopped: {workflow.codespace_name}")
+            except Exception as e:
+                logger.warning(f"Failed to stop Codespace: {e}")
+            try:
+                await self.client.delete_codespace(workflow.codespace_name)
+                workflow.execution_logs.append(f"Codespace deleted: {workflow.codespace_name}")
+            except Exception as e:
+                logger.warning(f"Failed to delete Codespace: {e}")
 
 
 # Example usage

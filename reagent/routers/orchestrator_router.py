@@ -6,6 +6,10 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 
 from file_manager import FileManager
+from events import get_event_bus, emit_event, EventType
+from context import AgentContext, ContextSource
+from modes import ExecutionMode, ModeConfig
+from compute import get_compute_router, ComputeCapability
 
 # Router for orchestration and workflow management
 orchestrator_router = AgentRouter(prefix="orchestrate", tags=["orchestration", "workflow"])
@@ -123,22 +127,77 @@ Workflow State: {workflow_state}
 What should we do next?""",
     )
     
+    # Convert MultimodalResponse to dict if needed
+    if hasattr(analysis, 'model_dump'):
+        analysis_dict = analysis.model_dump()
+    elif isinstance(analysis, dict):
+        analysis_dict = analysis
+    else:
+        # Fallback: try to access as object attributes
+        analysis_dict = {
+            'next_stage': getattr(analysis, 'next_stage', 'failed'),
+            'reason': getattr(analysis, 'reason', str(analysis)),
+            'feedback_needed': getattr(analysis, 'feedback_needed', False),
+            'suggestions': getattr(analysis, 'suggestions', [])
+        }
+    
     orchestrator_router.app.note(
-        f"Decision for {current_stage}: {analysis.get('next_stage')} - {analysis.get('reason')}",
+        f"Decision for {current_stage}: {analysis_dict.get('next_stage')} - {analysis_dict.get('reason')}",
         tags=["orchestration", "decision"]
     )
     
-    return analysis
+    return analysis_dict
 
 
 @orchestrator_router.reasoner(tags=["ai", "coordination", "adaptive"])
-async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
+async def orchestrate_contract_development_adaptive(
+    requirements: str,
+    mode: str = "orchestrate",
+    context: dict | None = None,
+) -> dict:
     """
     Adaptive orchestration with feedback loops and error recovery.
     Uses AI to decide next steps based on stage results.
+
+    Supports three execution modes:
+    - plan: AI analysis only, no execution
+    - orchestrate: Full pipeline with feedback loops (default)
+    - code: Direct code generation, skip planning
+
+    Args:
+        requirements: User requirements for the smart contract
+        mode: Execution mode (plan, orchestrate, code)
+        context: Optional AgentContext dict for mind building across stages
     """
+    mode_config = ModeConfig(mode=ExecutionMode(mode))
+
+    # Mode dispatch — plan and code delegate to their own routers
+    if mode_config.mode == ExecutionMode.PLAN:
+        return await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.plan_analyze_and_plan",
+            requirements=requirements,
+            context=context,
+            plan_depth=mode_config.plan_depth,
+        )
+
+    if mode_config.mode == ExecutionMode.CODE:
+        return await orchestrator_router.app.call(
+            f"{orchestrator_router.app.node_id}.code_direct_code_generation",
+            requirements=requirements,
+            context=context,
+            target_blockchain=mode_config.code_target_blockchain,
+            include_tests=mode_config.code_include_tests,
+            include_deployment=mode_config.code_include_deployment,
+        )
+
+    # ORCHESTRATE mode — full adaptive pipeline below
     workflow_id = f"workflow_{int(time.time())}"
     fm = _get_fm()
+
+    # Initialize or restore agent context
+    agent_ctx = AgentContext.from_dict(context) if context else AgentContext(workflow_id=workflow_id)
+    agent_ctx.workflow_id = workflow_id
+    agent_ctx.add_entry(ContextSource.USER_INPUT, requirements)
 
     # Initialize workflow state
     state = WorkflowState(
@@ -147,6 +206,41 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
         current_stage=WorkflowStage.IDEATION.value
     )
     _workflow_states[workflow_id] = state
+
+    # Emit workflow start event
+    await emit_event(
+        EventType.WORKFLOW_START,
+        workflow_id=workflow_id,
+        data={"requirements": requirements[:500]},
+        message=f"Workflow started: {workflow_id}",
+    )
+
+    # Emit context injected event
+    await emit_event(
+        EventType.CONTEXT_INJECTED,
+        workflow_id=workflow_id,
+        data={"entries_count": len(agent_ctx.entries), "user_tier": agent_ctx.user_tier},
+        message=f"Context initialized with {len(agent_ctx.entries)} entries",
+    )
+
+    # Select compute tier and emit event
+    compute = get_compute_router()
+    backend = compute.select_backend(
+        required_capabilities={ComputeCapability.COMPILE, ComputeCapability.TEST},
+        user_tier=agent_ctx.user_tier,
+        github_connected=agent_ctx.github_connected,
+        nosana_connected=agent_ctx.nosana_connected,
+    )
+    await emit_event(
+        EventType.COMPUTE_TIER_SELECTED,
+        workflow_id=workflow_id,
+        data={
+            "tier": backend.tier.value,
+            "user_tier": agent_ctx.user_tier,
+            "capabilities": ["compile", "test"],
+        },
+        message=f"Compute tier selected: {backend.tier.value}",
+    )
 
     # Create tracking issue in GitLab
     if fm:
@@ -164,26 +258,36 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
     while state.current_stage != WorkflowStage.COMPLETED.value and iteration < max_iterations:
         iteration += 1
         stage = state.current_stage
-        
+
+        # Emit stage start event
+        await emit_event(
+            EventType.STAGE_START,
+            workflow_id=workflow_id,
+            stage=stage,
+            data={"iteration": iteration},
+            message=f"Starting stage: {stage} (iteration {iteration})",
+        )
+
         orchestrator_router.app.note(
             f"Iteration {iteration}: Executing stage {stage}",
             tags=["orchestration", "iteration"]
         )
 
         try:
-            # Execute current stage
+            # Execute current stage (pass context to AI-calling stages)
+            ctx_dict = agent_ctx.to_dict()
             if stage == WorkflowStage.IDEATION.value:
-                result = await _execute_ideation(state, fm)
+                result = await _execute_ideation(state, fm, workflow_id, ctx_dict)
             elif stage == WorkflowStage.CODING.value:
-                result = await _execute_coding(state, fm)
+                result = await _execute_coding(state, fm, workflow_id, ctx_dict)
             elif stage == WorkflowStage.TESTING.value:
-                result = await _execute_testing(state, fm)
+                result = await _execute_testing(state, fm, workflow_id)
             elif stage == WorkflowStage.AUDITING.value:
-                result = await _execute_auditing(state, fm)
+                result = await _execute_auditing(state, fm, workflow_id, ctx_dict)
             elif stage == WorkflowStage.DEPLOYMENT.value:
-                result = await _execute_deployment(state, fm)
+                result = await _execute_deployment(state, fm, workflow_id)
             elif stage == WorkflowStage.MONITORING.value:
-                result = await _execute_monitoring(state, fm)
+                result = await _execute_monitoring(state, fm, workflow_id, ctx_dict)
                 state.current_stage = WorkflowStage.COMPLETED.value
                 break
             else:
@@ -191,14 +295,38 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
 
             # Store result
             state.stage_results[stage] = result
-            
+
+            # Accumulate context from stage result
+            if result.success:
+                agent_ctx.add_entry(ContextSource.STAGE_OUTPUT, f"Stage {stage} completed", stage=stage)
+            else:
+                agent_ctx.set_recovery_context(result.error or "Unknown error", stage)
+
             if result.success:
                 if stage not in state.stages_completed:
                     state.stages_completed.append(stage)
                 state.retry_counts[stage] = 0
+
+                # Emit stage complete event
+                await emit_event(
+                    EventType.STAGE_COMPLETE,
+                    workflow_id=workflow_id,
+                    stage=stage,
+                    data={"success": True},
+                    message=f"Stage {stage} completed successfully",
+                )
             else:
                 # Increment retry count
                 state.retry_counts[stage] = state.retry_counts.get(stage, 0) + 1
+
+                # Emit stage error event
+                await emit_event(
+                    EventType.STAGE_ERROR,
+                    workflow_id=workflow_id,
+                    stage=stage,
+                    data={"error": result.error, "retry_count": state.retry_counts[stage]},
+                    message=f"Stage {stage} failed: {result.error}",
+                )
 
             # AI decides next stage
             decision = await decide_next_stage(
@@ -211,9 +339,22 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
                 }
             )
 
+            # Emit decision event
+            await emit_event(
+                EventType.DECISION_MADE,
+                workflow_id=workflow_id,
+                stage=stage,
+                data={
+                    "next_stage": decision.get("next_stage"),
+                    "reason": decision.get("reason"),
+                    "feedback_needed": decision.get("feedback_needed"),
+                },
+                message=f"Decision: proceed to {decision.get('next_stage')}",
+            )
+
             next_stage = decision.get("next_stage")
             is_feedback = decision.get("feedback_needed", False)
-            
+
             if is_feedback:
                 feedback_loops.append({
                     "from": stage,
@@ -221,11 +362,20 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
                     "reason": decision.get("reason"),
                     "iteration": iteration
                 })
-                
+
+                # Emit feedback loop event
+                await emit_event(
+                    EventType.FEEDBACK_LOOP,
+                    workflow_id=workflow_id,
+                    stage=stage,
+                    data={"from": stage, "to": next_stage, "reason": decision.get("reason")},
+                    message=f"Feedback loop: {stage} -> {next_stage}",
+                )
+
                 if fm and state.gitlab_issue:
                     fm.gl.add_issue_note(
                         state.gitlab_issue["iid"],
-                        f"🔄 Feedback loop: {stage} → {next_stage}\nReason: {decision.get('reason')}"
+                        f"Feedback loop: {stage} -> {next_stage}\nReason: {decision.get('reason')}"
                     )
 
             # Check if we should stop
@@ -241,6 +391,16 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
                 f"Error in stage {stage}: {str(e)}",
                 tags=["orchestration", "error"]
             )
+
+            # Emit stage error event
+            await emit_event(
+                EventType.STAGE_ERROR,
+                workflow_id=workflow_id,
+                stage=stage,
+                data={"error": str(e), "exception": True},
+                message=f"Exception in stage {stage}: {str(e)}",
+            )
+
             state.status = "failed"
             state.current_stage = WorkflowStage.FAILED.value
             break
@@ -248,8 +408,20 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
     # Final status
     if state.current_stage == WorkflowStage.COMPLETED.value:
         state.status = "completed"
+        await emit_event(
+            EventType.WORKFLOW_COMPLETE,
+            workflow_id=workflow_id,
+            data={"stages_completed": state.stages_completed},
+            message=f"Workflow {workflow_id} completed successfully",
+        )
     elif state.current_stage == WorkflowStage.FAILED.value:
         state.status = "failed"
+        await emit_event(
+            EventType.WORKFLOW_FAILED,
+            workflow_id=workflow_id,
+            data={"failed_at": state.current_stage, "retry_counts": state.retry_counts},
+            message=f"Workflow {workflow_id} failed",
+        )
 
     result = OrchestrationResult(
         workflow_id=workflow_id,
@@ -271,19 +443,23 @@ async def orchestrate_contract_development_adaptive(requirements: str) -> dict:
 
 # Stage execution functions with error handling
 
-async def _execute_ideation(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+async def _execute_ideation(state: WorkflowState, fm: Optional[FileManager], workflow_id: str = "", context: dict | None = None) -> StageResult:
     """Execute ideation stage."""
     try:
         # Get context from previous attempts if any
-        context = ""
+        recovery = ""
         if WorkflowStage.CODING.value in state.stage_results:
             coding_result = state.stage_results[WorkflowStage.CODING.value]
             if not coding_result.success:
-                context = f"\nPrevious coding attempt failed: {coding_result.error}\nPlease refine the specification."
+                recovery = f"\nPrevious coding attempt failed: {coding_result.error}\nPlease refine the specification."
+
+        kwargs = {"requirements": state.requirements + recovery}
+        if context:
+            kwargs["context"] = context
 
         spec = await orchestrator_router.app.call(
             f"{orchestrator_router.app.node_id}.ideation_generate_contract_spec",
-            requirements=state.requirements + context,
+            **kwargs,
         )
         
         if fm and state.gitlab_issue:
@@ -308,7 +484,7 @@ async def _execute_ideation(state: WorkflowState, fm: Optional[FileManager]) -> 
         )
 
 
-async def _execute_coding(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+async def _execute_coding(state: WorkflowState, fm: Optional[FileManager], workflow_id: str = "", context: dict | None = None) -> StageResult:
     """Execute coding stage."""
     try:
         spec = state.stage_results.get(WorkflowStage.IDEATION.value)
@@ -322,15 +498,19 @@ async def _execute_coding(state: WorkflowState, fm: Optional[FileManager]) -> St
             )
 
         # Get feedback from testing if available
-        context = spec.output
+        spec_data = spec.output
         if WorkflowStage.TESTING.value in state.stage_results:
             test_result = state.stage_results[WorkflowStage.TESTING.value]
             if not test_result.success:
-                context["test_feedback"] = test_result.error
+                spec_data["test_feedback"] = test_result.error
+
+        kwargs = {"spec": spec_data}
+        if context:
+            kwargs["context"] = context
 
         code = await orchestrator_router.app.call(
             f"{orchestrator_router.app.node_id}.coding_generate_contract_code",
-            spec=context,
+            **kwargs,
         )
         
         if fm and state.gitlab_issue:
@@ -355,7 +535,7 @@ async def _execute_coding(state: WorkflowState, fm: Optional[FileManager]) -> St
         )
 
 
-async def _execute_testing(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+async def _execute_testing(state: WorkflowState, fm: Optional[FileManager], workflow_id: str = "") -> StageResult:
     """Execute testing stage."""
     try:
         code_result = state.stage_results.get(WorkflowStage.CODING.value)
@@ -409,17 +589,23 @@ async def _execute_testing(state: WorkflowState, fm: Optional[FileManager]) -> S
         )
 
 
-async def _execute_auditing(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+async def _execute_auditing(state: WorkflowState, fm: Optional[FileManager], workflow_id: str = "", context: dict | None = None) -> StageResult:
     """Execute auditing stage."""
     try:
         code_result = state.stage_results[WorkflowStage.CODING.value]
         spec = state.stage_results[WorkflowStage.IDEATION.value].output
         contract_path = f"contracts/{spec.get('name', 'Contract')}.sol"
-        
+
+        kwargs = {
+            "contract_code": code_result.output.get("solidity_code", ""),
+            "contract_path": contract_path,
+        }
+        if context:
+            kwargs["context"] = context
+
         audit = await orchestrator_router.app.call(
             f"{orchestrator_router.app.node_id}.auditing_comprehensive_audit",
-            contract_code=code_result.output.get("solidity_code", ""),
-            contract_path=contract_path,
+            **kwargs,
         )
         
         risk_level = audit.get("overall_risk", "unknown")
@@ -456,7 +642,7 @@ async def _execute_auditing(state: WorkflowState, fm: Optional[FileManager]) -> 
         )
 
 
-async def _execute_deployment(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+async def _execute_deployment(state: WorkflowState, fm: Optional[FileManager], workflow_id: str = "") -> StageResult:
     """Execute deployment stage."""
     try:
         spec = state.stage_results[WorkflowStage.IDEATION.value].output
@@ -498,14 +684,20 @@ async def _execute_deployment(state: WorkflowState, fm: Optional[FileManager]) -
         )
 
 
-async def _execute_monitoring(state: WorkflowState, fm: Optional[FileManager]) -> StageResult:
+async def _execute_monitoring(state: WorkflowState, fm: Optional[FileManager], workflow_id: str = "", context: dict | None = None) -> StageResult:
     """Execute monitoring stage."""
     try:
         deployment_result = state.stage_results[WorkflowStage.DEPLOYMENT.value]
-        
+
+        kwargs = {
+            "contract_address": deployment_result.output.get("contract_address", ""),
+        }
+        if context:
+            kwargs["context"] = context
+
         monitor = await orchestrator_router.app.call(
             f"{orchestrator_router.app.node_id}.monitoring_monitor_contract",
-            contract_address=deployment_result.output.get("contract_address", ""),
+            **kwargs,
         )
         
         if fm and state.gitlab_issue:

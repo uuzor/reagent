@@ -14,17 +14,23 @@ import asyncio
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from github_codespace_client import (
-        GitHubCodespaceClient,
+    from github_codespaces_full_client import (
+        GitHubCodespacesClient,
         CodespaceOrchestrator,
         CodespaceConfig,
         CodespaceWorkflow,
         SecureTokenStore
     )
+    # Alias for backward compat
+    GitHubCodespaceClient = GitHubCodespacesClient
 except ImportError:
-    # Fallback if cryptography not installed
+    # Fallback if dependencies not installed
     GitHubCodespaceClient = None
-    print("⚠️  GitHub Codespaces integration requires: pip install cryptography PyGithub aiohttp")
+    CodespaceOrchestrator = None
+    CodespaceConfig = None
+    CodespaceWorkflow = None
+    SecureTokenStore = None
+    print("Warning: GitHub Codespaces integration requires: pip install cryptography PyGithub aiohttp")
 
 
 # Router for GitHub Codespaces integration

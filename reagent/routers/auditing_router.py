@@ -5,6 +5,7 @@ import os
 import json
 
 from file_manager import FileManager
+from context import AgentContext
 
 # Router for auditing and analysis
 auditing_router = AgentRouter(prefix="auditing", tags=["auditing", "security"])
@@ -28,11 +29,17 @@ class AuditReport(BaseModel):
 
 
 @auditing_router.reasoner(tags=["ai", "z-ai", "analysis"])
-async def comprehensive_audit(contract_code: str, contract_path: str, branch: str = "main") -> dict:
+async def comprehensive_audit(contract_code: str, contract_path: str, branch: str = "main", context: dict | None = None) -> dict:
     """
     Perform comprehensive security audit using AI and static analysis.
     Reads contract from GitLab if contract_code is empty but contract_path is given.
     Writes audit report to the repository.
+
+    Args:
+        contract_code: Solidity source code to audit
+        contract_path: Path to contract file in repository
+        branch: Git branch to read from
+        context: Structured AgentContext dict for mind building across stages
     """
     fm = _get_fm()
 
@@ -42,10 +49,18 @@ async def comprehensive_audit(contract_code: str, contract_path: str, branch: st
         if not contract_code:
             return {"error": f"Could not read {contract_path} from branch {branch}"}
 
+    # Build prompt with context injection
+    user_prompt = f"Contract code:\n{contract_code}\n\nPerform security audit and provide detailed report."
+    if context:
+        ctx = AgentContext.from_dict(context) if isinstance(context, dict) else context
+        context_prompt = ctx.build_injection_prompt()
+        if context_prompt:
+            user_prompt += f"\n\n{context_prompt}"
+
     # Use AI for audit
     audit = await auditing_router.ai(
         system="You are a senior smart contract auditor. Analyze code for vulnerabilities, gas optimization, and best practices.",
-        user=f"Contract code:\n{contract_code}\n\nPerform security audit and provide detailed report.",
+        user=user_prompt,
         schema=AuditReport,
     )
 

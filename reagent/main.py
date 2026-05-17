@@ -21,6 +21,11 @@ from routers import (
     deployment_router,
     monitoring_router,
     orchestrator_router,
+    github_router,
+    compute_router,
+    events_router,
+    plan_router,
+    code_router,
 )
 from routers.nosana_router import nosana_router
 
@@ -124,6 +129,11 @@ app.include_router(deployment_router)
 app.include_router(monitoring_router)
 app.include_router(orchestrator_router)
 app.include_router(nosana_router)
+app.include_router(github_router)
+app.include_router(compute_router)
+app.include_router(events_router)
+app.include_router(plan_router)
+app.include_router(code_router)
 
 if __name__ == "__main__":
     # app.run() auto-detects CLI vs server mode (sdk/python/agentfield/agent.py:4194).

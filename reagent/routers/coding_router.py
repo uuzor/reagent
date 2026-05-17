@@ -4,6 +4,7 @@ import os
 import subprocess
 
 from file_manager import FileManager
+from context import AgentContext
 
 # Router for coding and code generation
 coding_router = AgentRouter(prefix="coding", tags=["coding", "generation"])
@@ -26,15 +27,16 @@ class ContractCode(BaseModel):
 
 
 @coding_router.reasoner(tags=["ai", "qwen", "qoder"])
-async def generate_contract_code(spec: dict, recovery_context: str | None = None) -> dict:
+async def generate_contract_code(spec: dict, recovery_context: str | None = None, context: dict | None = None) -> dict:
     """
     Generate smart contract code from specification using Qwen Cloud.
     Pushes code to a GitLab branch via FileManager and creates an MR.
     Falls back to local file write if FileManager is not available.
-    
+
     Args:
         spec: Contract specification dictionary
         recovery_context: Optional context from previous failed attempts to guide improvements
+        context: Structured AgentContext dict for mind building across stages
     """
     fm = _get_fm()
     contract_name = spec.get("name", "Contract")
@@ -44,6 +46,13 @@ async def generate_contract_code(spec: dict, recovery_context: str | None = None
     prompt = f"Specification: {spec}\nGenerate Solidity code, tests, and deployment script."
     if recovery_context:
         prompt += f"\n\nPrevious attempt had issues:\n{recovery_context}\nPlease address these issues in the new implementation."
+
+    # Inject structured context (mind building)
+    if context:
+        ctx = AgentContext.from_dict(context) if isinstance(context, dict) else context
+        context_prompt = ctx.build_injection_prompt()
+        if context_prompt:
+            prompt += f"\n\n{context_prompt}"
 
     # Use Qwen for code generation
     code = await coding_router.ai(

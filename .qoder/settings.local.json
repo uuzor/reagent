@@ -36,7 +36,10 @@
       "Bash(source reagent/.env && export GITLAB_URL GITLAB_TOKEN GITLAB_PROJECT_ID && python3 -c \"\nimport gitlab, os\n\nurl = os.environ['GITLAB_URL']\ntoken = os.environ['GITLAB_TOKEN']\npid = int\\(os.environ['GITLAB_PROJECT_ID']\\)\n\ngl = gitlab.Gitlab\\(url, private_token=token\\)\n\n# Check auth\ngl.auth\\(\\)\nprint\\(f'User: {gl.user.username}'\\)\n\nproject = gl.projects.get\\(pid\\)\nprint\\(f'Project: {project.path_with_namespace}'\\)\n\n# Test push\ntry:\n    commit = project.commits.create\\({\n        'branch': 'main',\n        'commit_message': 'Initial commit',\n        'actions': [\n            {'action': 'create', 'file_path': 'README.md', 'content': '# Reagent Test Project\\\\n\\\\nSmart contract orchestration test repo.\\\\n'},\n        ],\n    }\\)\n    print\\(f'Seeded repo: {commit.short_id}'\\)\nexcept Exception as e:\n    print\\(f'Seed failed: {type\\(e\\).__name__}: {str\\(e\\)[:100]}'\\)\n\")",
       "Bash(source reagent/.env && export GITLAB_URL GITLAB_TOKEN GITLAB_PROJECT_ID && python -m pytest reagent/tests/test_gitlab_integration.py -v -s -m integration 2>&1)",
       "Bash(python -m pytest reagent/tests/test_gitlab_client.py reagent/tests/test_file_manager.py -v --tb=short 2>&1)",
-      "Bash(pip show agentfield 2>/dev/null | head -20)"
+      "Bash(pip show agentfield 2>/dev/null | head -20)",
+      "Bash(find /workspaces/reagent -type f -name \"*.py\" | head -60)",
+      "Bash(python3:*)",
+      "Bash(ls:*)"
     ]
   }
 }
