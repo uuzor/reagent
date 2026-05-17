@@ -17,6 +17,33 @@ from events import get_event_bus, EventType, WorkflowEvent
 
 logger = logging.getLogger(__name__)
 
+
+def _serialize_value(obj):
+    """Recursively serialize objects for JSON, handling datetime and pydantic models."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _serialize_value(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serialize_value(item) for item in obj]
+    if hasattr(obj, 'model_dump'):  # Pydantic v2
+        return _serialize_value(obj.model_dump())
+    if hasattr(obj, 'dict'):  # Pydantic v1
+        return _serialize_value(obj.dict())
+    return obj
+
+
+def _event_to_message(event: WorkflowEvent) -> dict:
+    """Convert WorkflowEvent to a JSON-serializable WebSocket message."""
+    return {
+        "type": event.event_type,
+        "workflow_id": event.workflow_id,
+        "stage": event.stage,
+        "timestamp": event.timestamp.isoformat(),
+        "message": event.message,
+        "data": _serialize_value(event.data),
+    }
+
 # Create router (not AgentRouter, regular FastAPI router for WebSocket)
 websocket_router = APIRouter(prefix="/ws", tags=["websocket"])
 
@@ -57,17 +84,7 @@ async def websocket_endpoint(websocket: WebSocket, workflow_id: str):
         try:
             while True:
                 event = await event_queue.get()
-                
-                # Convert event to WebSocket message
-                message = {
-                    "type": event.event_type,
-                    "workflow_id": event.workflow_id,
-                    "stage": event.stage,
-                    "timestamp": event.timestamp.isoformat(),
-                    "message": event.message,
-                    "data": event.data
-                }
-                
+                message = _event_to_message(event)
                 await websocket.send_json(message)
         except Exception as e:
             logger.error(f"Error forwarding events: {e}")
