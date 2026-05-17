@@ -11,6 +11,7 @@ from .compute_router import compute_router
 from .events_router import events_router
 from .plan_router import plan_router
 from .code_router import code_router
+from .websocket_router import websocket_router
 
 __all__ = [
     "auditing_router",
@@ -26,4 +27,5 @@ __all__ = [
     "events_router",
     "plan_router",
     "code_router",
+    "websocket_router",
 ]

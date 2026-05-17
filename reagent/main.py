@@ -26,9 +26,9 @@ from routers import (
     events_router,
     plan_router,
     code_router,
+    websocket_router,
 )
 from routers.nosana_router import nosana_router
-from routers.websocket_router import websocket_router
 
 # Load local environment values from .env for development/runtime convenience.
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -135,11 +135,7 @@ app.include_router(compute_router)
 app.include_router(events_router)
 app.include_router(plan_router)
 app.include_router(code_router)
-
-# Register WebSocket router (FastAPI router, not AgentRouter)
-# Note: AgentField will auto-register WebSocket routes from the router
-# If needed, access underlying FastAPI app with: app._fastapi_app or similar
-# app.app.include_router(websocket_router)
+app.include_router(websocket_router)
 
 if __name__ == "__main__":
     # app.run() auto-detects CLI vs server mode (sdk/python/agentfield/agent.py:4194).

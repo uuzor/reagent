@@ -32,6 +32,7 @@ class EventType(str, Enum):
     
     # Orchestration events
     FEEDBACK_LOOP = "feedback.loop"
+    DECISION_MADE = "decision.made"
     COMPUTE_TIER_SELECTED = "compute.tier_selected"
     
     # System events
@@ -196,5 +197,31 @@ def reset_event_bus() -> None:
     """Reset global event bus (for testing)."""
     global _event_bus
     _event_bus = None
+
+
+async def emit_event(
+    event_type: EventType,
+    workflow_id: str,
+    stage: Optional[str] = None,
+    data: Optional[Dict[str, Any]] = None,
+    message: str = "",
+) -> None:
+    """Convenience helper to emit an event.
+    
+    Args:
+        event_type: Type of event
+        workflow_id: Workflow ID
+        stage: Optional stage name
+        data: Optional event data dict
+        message: Human-readable message
+    """
+    event = WorkflowEvent(
+        event_type=event_type,
+        workflow_id=workflow_id,
+        stage=stage,
+        data=data or {},
+        message=message,
+    )
+    await get_event_bus().emit(event)
 
 # Made with Bob
