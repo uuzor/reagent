@@ -1,188 +1,200 @@
-"""
-Event Logging & Streaming System
-Provides structured event emission for workflow runs, enabling
-real-time frontend updates via SSE/WebSocket and event history queries.
-"""
-import asyncio
-import time
-import json
-import uuid
-from enum import Enum
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, AsyncIterator
-from collections import defaultdict
-import logging
+"""Event bus system for real-time workflow updates.
 
-logger = logging.getLogger(__name__)
+Provides pub/sub event streaming for WebSocket clients and internal components.
+"""
+
+import asyncio
+from collections import deque
+from datetime import datetime
+from enum import Enum
+from typing import Dict, List, Optional, Any
+from pydantic import BaseModel, Field
 
 
 class EventType(str, Enum):
-    """Types of events emitted during workflow execution."""
-    # Workflow lifecycle
-    WORKFLOW_START = "workflow_start"
-    WORKFLOW_STATUS = "workflow_status"
-    WORKFLOW_COMPLETE = "workflow_complete"
-    WORKFLOW_FAILED = "workflow_failed"
+    """Event types for workflow tracking."""
+    # Workflow events
+    WORKFLOW_START = "workflow.started"
+    WORKFLOW_STATUS = "workflow.status"
+    WORKFLOW_COMPLETE = "workflow.complete"
+    WORKFLOW_FAILED = "workflow.failed"
+    
+    # Stage events
+    STAGE_START = "stage.started"
+    STAGE_PROGRESS = "stage.progress"
+    STAGE_COMPLETE = "stage.complete"
+    STAGE_ERROR = "stage.error"
+    
+    # Interactive events
+    QUESTION_ASKED = "question.asked"
+    ANSWER_RECEIVED = "answer.received"
+    CONTEXT_INJECTED = "context.injected"
+    
+    # Orchestration events
+    FEEDBACK_LOOP = "feedback.loop"
+    COMPUTE_TIER_SELECTED = "compute.tier_selected"
+    
+    # System events
+    LOG_LINE = "log.line"
+    ERROR = "error"
 
-    # Stage lifecycle
-    STAGE_START = "stage_start"
-    STAGE_PROGRESS = "stage_progress"
-    STAGE_COMPLETE = "stage_complete"
-    STAGE_ERROR = "stage_error"
 
-    # Orchestration
-    FEEDBACK_LOOP = "feedback_loop"
-    DECISION_MADE = "decision_made"
-
-    # Compute
-    COMPUTE_TIER_SELECTED = "compute_tier_selected"
-
-    # Context
-    CONTEXT_INJECTED = "context_injected"
-
-    # General
-    LOG_LINE = "log_line"
-
-
-@dataclass
-class WorkflowEvent:
-    """A single event emitted during a workflow run."""
+class WorkflowEvent(BaseModel):
+    """Event emitted during workflow execution."""
+    event_id: str = Field(default_factory=lambda: f"evt_{int(datetime.utcnow().timestamp() * 1000)}")
     event_type: EventType
     workflow_id: str
-    event_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     stage: Optional[str] = None
-    timestamp: float = field(default_factory=time.time)
-    data: Dict[str, Any] = field(default_factory=dict)
-    message: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "event_id": self.event_id,
-            "event_type": self.event_type.value,
-            "workflow_id": self.workflow_id,
-            "stage": self.stage,
-            "timestamp": self.timestamp,
-            "data": self.data,
-            "message": self.message,
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    message: str
+    data: Dict[str, Any] = Field(default_factory=dict)
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
         }
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
 
 
 class EventBus:
-    """In-process async event bus with fan-out to subscribers.
-
-    Uses asyncio.Queue per subscriber for backpressure.
-    Maintains a bounded ring buffer for event history queries.
-    """
-
-    def __init__(self, max_queue_size: int = 1000, max_store_size: int = 10000):
-        self._subscribers: Dict[str, asyncio.Queue] = {}
-        self._subscriber_filters: Dict[str, Optional[str]] = {}  # sub_id -> workflow_id filter
-        self._event_store: List[WorkflowEvent] = []
-        self._max_store_size = max_store_size
-        self._max_queue_size = max_queue_size
-        self._workflow_index: Dict[str, List[int]] = defaultdict(list)  # workflow_id -> indices
-
+    """In-process async pub/sub event bus for workflow events."""
+    
+    def __init__(self, max_history: int = 1000):
+        """Initialize event bus.
+        
+        Args:
+            max_history: Maximum events to keep in history per workflow
+        """
+        self.max_history = max_history
+        
+        # Subscribers: subscriber_id -> (queue, workflow_id_filter)
+        self._subscribers: Dict[str, tuple[asyncio.Queue, Optional[str]]] = {}
+        
+        # Event history: workflow_id -> deque of events
+        self._history: Dict[str, deque] = {}
+        
+        # Subscriber counter for unique IDs
+        self._subscriber_counter = 0
+    
     async def emit(self, event: WorkflowEvent) -> None:
-        """Publish event to all subscribers and store it."""
-        self._store_event(event)
-
-        dead_queues = []
-        for sub_id, queue in self._subscribers.items():
-            # Check workflow filter
-            filter_wf = self._subscriber_filters.get(sub_id)
-            if filter_wf and event.workflow_id != filter_wf:
-                continue
-
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                logger.warning(f"Dropping events for slow subscriber: {sub_id}")
-                dead_queues.append(sub_id)
-
-        for sub_id in dead_queues:
-            self._subscribers.pop(sub_id, None)
-            self._subscriber_filters.pop(sub_id, None)
-
-    def subscribe(self, workflow_id: Optional[str] = None) -> tuple[str, asyncio.Queue]:
-        """Create a subscriber queue. Optionally filter by workflow_id.
-
+        """Emit event to all subscribers.
+        
+        Args:
+            event: Event to emit
+        """
+        # Store in history
+        if event.workflow_id not in self._history:
+            self._history[event.workflow_id] = deque(maxlen=self.max_history)
+        self._history[event.workflow_id].append(event)
+        
+        # Fan out to subscribers
+        dead_subscribers = []
+        for subscriber_id, (queue, workflow_filter) in self._subscribers.items():
+            # Check if subscriber is interested in this workflow
+            if workflow_filter is None or workflow_filter == event.workflow_id:
+                try:
+                    # Non-blocking put
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # Subscriber is too slow, mark for removal
+                    dead_subscribers.append(subscriber_id)
+        
+        # Clean up dead subscribers
+        for subscriber_id in dead_subscribers:
+            self.unsubscribe(subscriber_id)
+    
+    def subscribe(self, workflow_id: Optional[str] = None, maxsize: int = 100) -> tuple[str, asyncio.Queue]:
+        """Subscribe to events.
+        
+        Args:
+            workflow_id: Filter events for specific workflow (None = all workflows)
+            maxsize: Maximum queue size
+            
         Returns:
             Tuple of (subscriber_id, queue)
         """
-        sub_id = str(uuid.uuid4())[:8]
-        queue = asyncio.Queue(maxsize=self._max_queue_size)
-        self._subscribers[sub_id] = queue
-        self._subscriber_filters[sub_id] = workflow_id
-        return sub_id, queue
+        self._subscriber_counter += 1
+        subscriber_id = f"sub_{self._subscriber_counter}"
+        
+        queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+        self._subscribers[subscriber_id] = (queue, workflow_id)
+        
+        return subscriber_id, queue
+    
+    def unsubscribe(self, subscriber_id: str) -> bool:
+        """Unsubscribe from events.
+        
+        Args:
+            subscriber_id: Subscriber ID from subscribe()
+            
+        Returns:
+            True if unsubscribed, False if not found
+        """
+        if subscriber_id in self._subscribers:
+            del self._subscribers[subscriber_id]
+            return True
+        return False
+    
+    def get_history(self, workflow_id: str, limit: Optional[int] = None) -> List[WorkflowEvent]:
+        """Get event history for a workflow.
+        
+        Args:
+            workflow_id: Workflow ID
+            limit: Maximum events to return (most recent)
+            
+        Returns:
+            List of events (oldest to newest)
+        """
+        if workflow_id not in self._history:
+            return []
+        
+        events = list(self._history[workflow_id])
+        
+        if limit is not None and limit > 0:
+            events = events[-limit:]
+        
+        return events
+    
+    def clear_history(self, workflow_id: str) -> None:
+        """Clear event history for a workflow.
+        
+        Args:
+            workflow_id: Workflow ID
+        """
+        if workflow_id in self._history:
+            del self._history[workflow_id]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get event bus statistics.
+        
+        Returns:
+            Statistics dictionary
+        """
+        return {
+            "active_subscribers": len(self._subscribers),
+            "workflows_tracked": len(self._history),
+            "total_events": sum(len(h) for h in self._history.values()),
+        }
 
-    def unsubscribe(self, subscriber_id: str) -> None:
-        """Remove a subscriber."""
-        self._subscribers.pop(subscriber_id, None)
-        self._subscriber_filters.pop(subscriber_id, None)
 
-    def get_history(self, workflow_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieve stored events for a workflow."""
-        indices = self._workflow_index.get(workflow_id, [])
-        recent = indices[-limit:]
-        return [self._event_store[i].to_dict() for i in recent if i < len(self._event_store)]
-
-    def get_all_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieve recent events across all workflows."""
-        events = self._event_store[-limit:]
-        return [e.to_dict() for e in events]
-
-    def _store_event(self, event: WorkflowEvent) -> None:
-        """Store event in ring buffer with index."""
-        idx = len(self._event_store)
-        self._event_store.append(event)
-        self._workflow_index[event.workflow_id].append(idx)
-
-        # Trim if over max size
-        if len(self._event_store) > self._max_store_size:
-            trim = len(self._event_store) - self._max_store_size
-            self._event_store = self._event_store[trim:]
-            # Rebuild index (simplified — clear and rebuild)
-            self._workflow_index = defaultdict(list)
-            for i, e in enumerate(self._event_store):
-                self._workflow_index[e.workflow_id].append(i)
-
-    @property
-    def subscriber_count(self) -> int:
-        return len(self._subscribers)
-
-    @property
-    def total_events(self) -> int:
-        return len(self._event_store)
-
-
-# Singleton
+# Global singleton
 _event_bus: Optional[EventBus] = None
 
 
 def get_event_bus() -> EventBus:
+    """Get global event bus singleton.
+    
+    Returns:
+        EventBus instance
+    """
     global _event_bus
     if _event_bus is None:
         _event_bus = EventBus()
     return _event_bus
 
 
-async def emit_event(
-    event_type: EventType,
-    workflow_id: str,
-    stage: Optional[str] = None,
-    data: Optional[Dict[str, Any]] = None,
-    message: str = "",
-) -> None:
-    """Convenience function to emit an event via the singleton bus."""
-    bus = get_event_bus()
-    event = WorkflowEvent(
-        event_type=event_type,
-        workflow_id=workflow_id,
-        stage=stage,
-        data=data or {},
-        message=message,
-    )
-    await bus.emit(event)
+def reset_event_bus() -> None:
+    """Reset global event bus (for testing)."""
+    global _event_bus
+    _event_bus = None
+
+# Made with Bob
