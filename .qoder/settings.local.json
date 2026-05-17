@@ -39,7 +39,19 @@
       "Bash(pip show agentfield 2>/dev/null | head -20)",
       "Bash(find /workspaces/reagent -type f -name \"*.py\" | head -60)",
       "Bash(python3:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(ls reagent/reasoners/ 2>/dev/null || echo \"No reasoners directory\")",
+      "Bash(grep -n \"AgentRouter\\\\|APIRouter\" reagent/routers/*.py reagent/websocket_handler.py reagent/questions.py 2>/dev/null | head -20)",
+      "Bash(grep:*)",
+      "Bash(pkill -f \"uvicorn\\\\|main.py\" 2>/dev/null; sleep 2; python -c \"from routers import websocket_router; print\\('websocket_router import OK:', websocket_router\\)\")",
+      "Bash(python main.py &>/tmp/server.log &\necho \"Server PID: $!\"\nsleep 5\n# Check if it started successfully\ngrep -E \"Uvicorn|Listening|Error|Traceback\" /tmp/server.log | tail -10)",
+      "Bash(sleep 5 && grep -E \"Uvicorn|Listening|Error|Traceback|reagent|AI provider\" /tmp/server.log | tail -15)",
+      "Bash(cd reagent && python main.py &>/tmp/server.log &\necho \"Server PID: $!\"\nsleep 6\ngrep -E \"Uvicorn|Listening|Error|Traceback|reagent|AI provider|8001\" /tmp/server.log | tail -15)",
+      "Bash(# Test WebSocket endpoint is accessible\ncurl -s http://localhost:8002/docs 2>/dev/null | grep -o \"ws\" | head -1 && echo \"Docs available\"\n\n# Check if /ws route is registered\ncurl -s http://localhost:8002/openapi.json | python3 -c \"\nimport json, sys\ndata = json.load\\(sys.stdin\\)\npaths = data.get\\('paths', {}\\)\nws_paths = [p for p in paths if 'ws' in p.lower\\(\\)]\nprint\\('WebSocket-related paths:', ws_paths if ws_paths else 'None found'\\)\n# Also show all paths count\nprint\\('Total paths:', len\\(paths\\)\\)\n\")",
+      "Bash(python3 -c \"\nimport asyncio\nimport websockets\nimport json\n\nasync def test_interactive_workflow\\(\\):\n    async with websockets.connect\\('ws://localhost:8002/ws/test_e2e_001', open_timeout=5\\) as ws:\n        # Receive connection confirmation\n        connected = json.loads\\(await asyncio.wait_for\\(ws.recv\\(\\), timeout=5\\)\\)\n        print\\(f'1. Connected: {connected[\\\\\"type\\\\\"]}'\\)\n        \n        # Start workflow\n        await ws.send\\(json.dumps\\({\n            'type': 'start_workflow',\n            'workflow_id': 'test_e2e_001',\n            'requirements': 'Build a simple ERC20 token',\n            'mode': 'plan'\n        }\\)\\)\n        print\\('2. Sent start_workflow'\\)\n        \n        # Listen for a few messages\n        for _ in range\\(5\\):\n            try:\n                msg = json.loads\\(await asyncio.wait_for\\(ws.recv\\(\\), timeout=10\\)\\)\n                msg_type = msg.get\\('type'\\)\n                print\\(f'3. Received: {msg_type}'\\)\n                if msg_type in \\('workflow.complete', 'workflow.failed', 'error'\\):\n                    break\n            except asyncio.TimeoutError:\n                print\\('   \\(no more messages\\)'\\)\n                break\n        \n        # Send ping\n        await ws.send\\(json.dumps\\({'type': 'ping'}\\)\\)\n        pong = json.loads\\(await asyncio.wait_for\\(ws.recv\\(\\), timeout=5\\)\\)\n        print\\(f'4. Ping/Pong: {pong[\\\\\"type\\\\\"]}'\\)\n        \n        print\\('\\\\\\\\nSUCCESS: Full WebSocket flow working!'\\)\n\nasyncio.run\\(test_interactive_workflow\\(\\)\\)\n\" 2>&1)",
+      "Bash(curl -s http://localhost:8002/ws/stats | python3 -m json.tool)",
+      "Bash(cd /workspaces/reagent && git status && git diff --stat)",
+      "Bash(git add reagent/events.py reagent/main.py reagent/routers/__init__.py && git commit -m \"$\\(cat <<'EOF'\nregister websocket router and add missing emit_event helper\n\n- Export websocket_router from routers/__init__.py\n- Import and register websocket_router in main.py \\(was commented out\\)\n- Add emit_event\\(\\) convenience function to events.py \\(was imported but missing\\)\n- Add missing DECISION_MADE EventType enum value\nEOF\n\\)\")"
     ]
   }
 }
