@@ -2,6 +2,7 @@ from agentfield import AgentRouter
 from pydantic import BaseModel, Field
 import os
 import subprocess
+from typing import Optional, List, Any, Dict
 
 from file_manager import FileManager
 from context import AgentContext
@@ -19,6 +20,18 @@ def _get_fm() -> FileManager | None:
     return _fm
 
 
+class ContractCodeInput(BaseModel):
+    """Contract specification input for code generation."""
+    name: str = Field(default="Contract", description="Contract name")
+    description: str = Field(default="", description="Contract description")
+    features: List[str] = Field(default_factory=list, description="Key features")
+    blockchain: str = Field(default="ethereum", description="Target blockchain")
+    standards: List[str] = Field(default_factory=list, description="ERC standards")
+    additional_requirements: Optional[str] = Field(default=None, description="Additional requirements")
+    test_feedback: Optional[str] = Field(default=None, description="Feedback from testing")
+    market_research: Optional[Dict[str, Any]] = Field(default=None, description="Market research data")
+
+
 class ContractCode(BaseModel):
     """Structured output for generated contract code."""
     solidity_code: str = Field(description="Solidity contract code")
@@ -26,24 +39,75 @@ class ContractCode(BaseModel):
     deployment_script: str = Field(description="Deployment script")
 
 
+def _parse_spec_string(text: str) -> dict:
+    """Parse a stringified Pydantic model into a dict.
+
+    AgentField SDK stringifies Pydantic models in cross-agent calls,
+    producing: "name='Foo' description='Bar' features=['a', 'b']"
+    """
+    result = {}
+    import ast
+    import re
+
+    # Match key=value pairs where value can be quoted string or list
+    pattern = r"(\w+)=((?:'(?:[^'\\]|\\.)*')|(?:\"(?:[^\"\\]|\\.)*\")|(?:\[[^\]]*\]))"
+    for match in re.finditer(pattern, text):
+        key = match.group(1)
+        value_str = match.group(2)
+        try:
+            result[key] = ast.literal_eval(value_str)
+        except (ValueError, SyntaxError):
+            result[key] = value_str.strip("'\"")
+
+    return result
+
+
 @coding_router.reasoner(tags=["ai", "qwen", "qoder"])
-async def generate_contract_code(spec: dict, recovery_context: str | None = None, context: dict | None = None) -> dict:
+async def generate_contract_code(
+    spec: dict,
+    recovery_context: str | None = None,
+    context: dict | None = None,
+) -> dict:
     """
     Generate smart contract code from specification using Qwen Cloud.
     Pushes code to a GitLab branch via FileManager and creates an MR.
     Falls back to local file write if FileManager is not available.
 
     Args:
-        spec: Contract specification dictionary
+        spec: Contract specification (dict or stringified model)
         recovery_context: Optional context from previous failed attempts to guide improvements
         context: Structured AgentContext dict for mind building across stages
     """
     fm = _get_fm()
-    contract_name = spec.get("name", "Contract")
+
+    # Handle spec being either a dict or a stringified Pydantic model
+    if isinstance(spec, str):
+        # Parse stringified model: "name='Foo' description='Bar' features=['a', 'b']"
+        spec_dict = _parse_spec_string(spec)
+    elif hasattr(spec, 'model_dump'):
+        spec_dict = spec.model_dump()
+    elif isinstance(spec, dict):
+        spec_dict = spec
+    else:
+        spec_dict = {}
+
+    contract_name = spec_dict.get("name", "Contract")
     branch_name = f"reagent/{contract_name.lower().replace(' ', '-')}"
 
     # Build prompt with recovery context if provided
-    prompt = f"Specification: {spec}\nGenerate Solidity code, tests, and deployment script."
+    prompt = f"""Contract Name: {spec_dict.get('name', 'Contract')}
+Description: {spec_dict.get('description', '')}
+Features: {', '.join(spec_dict.get('features', []))}
+Blockchain: {spec_dict.get('blockchain', 'ethereum')}
+Standards: {', '.join(spec_dict.get('standards', []))}"""
+
+    if spec_dict.get('additional_requirements'):
+        prompt += f"\nAdditional Requirements: {spec_dict['additional_requirements']}"
+    if spec_dict.get('test_feedback'):
+        prompt += f"\nTest Feedback: {spec_dict['test_feedback']}"
+
+    prompt += "\n\nGenerate Solidity code, tests, and deployment script."
+
     if recovery_context:
         prompt += f"\n\nPrevious attempt had issues:\n{recovery_context}\nPlease address these issues in the new implementation."
 
@@ -54,9 +118,20 @@ async def generate_contract_code(spec: dict, recovery_context: str | None = None
         if context_prompt:
             prompt += f"\n\n{context_prompt}"
 
-    # Use Qwen for code generation
+    # Use the dynamic prompt builder for code generation
+    from agents.prompt_builder import build_system_prompt
+    from agents.file_agent import determine_file_structure
+    from agents.blockchain_agent import recommend_blockchain
+
+    system_prompt = build_system_prompt(
+        task_type="code",
+        style_guide="detailed",
+        security_level="high",
+        library_pref="openzeppelin",
+    )
+
     code = await coding_router.ai(
-        system="You are an expert Solidity developer. Generate production-ready smart contract code with security best practices.",
+        system=system_prompt,
         user=prompt,
         schema=ContractCode,
     )
@@ -91,7 +166,7 @@ async def generate_contract_code(spec: dict, recovery_context: str | None = None
         mr = fm.gl.create_merge_request(
             title=f"Add {contract_name} smart contract",
             source_branch=branch_name,
-            description=f"Auto-generated contract from spec:\n{spec}",
+            description=f"Auto-generated contract: {spec_dict.get('name', 'Contract')}\n{spec_dict.get('description', '')}",
         )
         gitlab_ref = {
             "type": "merge_request",

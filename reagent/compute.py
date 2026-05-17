@@ -330,7 +330,10 @@ class ComputeRouter:
         github_connected: bool = False,
         nosana_connected: bool = False,
     ) -> Any:
-        """Select the appropriate compute backend based on requirements and user tier.
+        """Select the appropriate compute backend using agent evaluation.
+
+        Replaces the hardcoded if/else tree with the compute agent that
+        evaluates backend availability, cost, performance, and task requirements.
 
         Args:
             required_capabilities: Set of capabilities needed for the task
@@ -341,32 +344,14 @@ class ComputeRouter:
         Returns:
             A ComputeBackend instance
         """
-        caps = required_capabilities or set()
-        needs_gpu = ComputeCapability.GPU in caps
-
-        # GPU tasks always go to Nosana
-        if needs_gpu:
-            if self._nosana_backend:
-                return self._nosana_backend
-            logger.warning("GPU required but Nosana not available — falling back to local")
-
-        # Free users with Codespaces connected -> Codespaces (zero cost)
-        if user_tier == "free" and github_connected and self._codespaces_backend:
-            return self._codespaces_backend
-
-        # Premium users -> prefer Nosana
-        if user_tier == "premium" and self._nosana_backend:
-            return self._nosana_backend
-
-        # Free user without Codespaces -> escalate to Nosana if available
-        if user_tier == "free" and not github_connected and self._nosana_backend:
-            return self._nosana_backend
-
-        # Fallback: Codespaces if available, then local
-        if self._codespaces_backend:
-            return self._codespaces_backend
-
-        return self._local_backend
+        from agents.compute_agent import select_compute_backend
+        return select_compute_backend(
+            self,
+            required_capabilities or set(),
+            user_tier,
+            github_connected,
+            nosana_connected,
+        )
 
     async def execute(
         self,

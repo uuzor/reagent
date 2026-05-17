@@ -1,6 +1,8 @@
 from agentfield import AgentRouter
 from pydantic import BaseModel, Field
+import json
 import os
+import re
 import time
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -103,6 +105,10 @@ async def decide_next_stage(
     """
     AI-powered decision maker for workflow progression.
     Analyzes stage results and decides next action (proceed, retry, or go back).
+
+    Deprecated: Use graph.edges.ai_route_after_stage() instead.
+    This function uses brittle markdown-regex JSON parsing.
+    The new approach uses LangChain StructuredOutput for typed responses.
     """
     # Use AI to analyze the situation
     analysis = await orchestrator_router.ai(
@@ -129,17 +135,40 @@ What should we do next?""",
     
     # Convert MultimodalResponse to dict if needed
     if hasattr(analysis, 'model_dump'):
-        analysis_dict = analysis.model_dump()
+        raw = analysis.model_dump()
     elif isinstance(analysis, dict):
-        analysis_dict = analysis
+        raw = analysis
     else:
-        # Fallback: try to access as object attributes
+        raw = {'text': str(analysis)}
+
+    # Extract JSON from the response (handle markdown code blocks)
+    if isinstance(raw, dict):
+        text = raw.get('text', '') or raw.get('content', '') or json.dumps(raw)
+    else:
+        text = str(raw)
+
+    # Try to extract JSON from markdown code blocks
+    json_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?\s*```', text)
+    if json_match:
+        text = json_match.group(1).strip()
+
+    # Parse JSON
+    try:
+        analysis_dict = json.loads(text)
+    except json.JSONDecodeError:
+        # Fallback: try to extract key fields from text
         analysis_dict = {
-            'next_stage': getattr(analysis, 'next_stage', 'failed'),
-            'reason': getattr(analysis, 'reason', str(analysis)),
-            'feedback_needed': getattr(analysis, 'feedback_needed', False),
-            'suggestions': getattr(analysis, 'suggestions', [])
+            'next_stage': 'failed',
+            'reason': text[:500],
+            'feedback_needed': False,
+            'suggestions': []
         }
+
+    # Ensure required fields exist
+    analysis_dict.setdefault('next_stage', 'failed')
+    analysis_dict.setdefault('reason', '')
+    analysis_dict.setdefault('feedback_needed', False)
+    analysis_dict.setdefault('suggestions', [])
     
     orchestrator_router.app.note(
         f"Decision for {current_stage}: {analysis_dict.get('next_stage')} - {analysis_dict.get('reason')}",
@@ -1060,6 +1089,11 @@ User Specifications:
             requirements=enhanced_requirements,
         )
         
+        # Update state requirements to reflect user's actual choices
+        # This prevents decide_next_stage from seeing a mismatch between
+        # original requirements (e.g. "ERC-20") and the spec (e.g. "ERC-1155")
+        state.requirements = enhanced_requirements
+        
         if fm and state.gitlab_issue:
             fm.gl.add_issue_note(
                 state.gitlab_issue["iid"],
@@ -1219,3 +1253,212 @@ async def _execute_deployment_interactive(
         )
 
 # Made with Bob
+
+
+# ──────────────────────────────────────────────────────────────
+# LangGraph-based orchestration (Phases 1-5: unified, persistent, observable)
+# ──────────────────────────────────────────────────────────────
+
+@orchestrator_router.reasoner(tags=["ai", "coordination", "langgraph"])
+async def run_contract_workflow(
+    requirements: str,
+    mode: str = "orchestrate",
+    context: dict | None = None,
+) -> dict:
+    """
+    Unified LangGraph-based contract development workflow.
+
+    Phase 4: Single graph entry point replaces 3 duplicate orchestration
+    implementations (orchestrate_contract_development, _adaptive, _interactive).
+    Mode dispatch selects the appropriate subgraph:
+    - "plan" → analysis only
+    - "code" → direct code generation
+    - "orchestrate" → full pipeline with feedback loops
+
+    Phase 5: Includes cost tracking, structured logging, and LangSmith tracing.
+
+    Args:
+        requirements: What to build
+        mode: "plan", "code", or "orchestrate"
+        context: Structured AgentContext for mind building
+
+    Returns:
+        OrchestrationResult-compatible dict with workflow outputs.
+    """
+    import uuid
+    from context import AgentContext
+    from graph.observability import (
+        CostTrackingCallback,
+        workflow_logger,
+        log_stage_event,
+        enable_langsmith_tracing,
+        is_langsmith_enabled,
+    )
+
+    # Enable LangSmith if configured
+    enable_langsmith_tracing()
+
+    workflow_id = f"workflow_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+
+    # Set entry point based on mode
+    entry_stage = {"plan": "plan", "code": "code", "orchestrate": "ideation"}.get(mode, "orchestrate")
+
+    graph = create_compiled_graph(mode=mode, persistent=True)
+
+    # Build initial agent context
+    agent_ctx = AgentContext(workflow_id=workflow_id)
+    if context:
+        agent_ctx = AgentContext.from_dict(context) if isinstance(context, dict) else context
+    agent_ctx.add_entry(
+        source=ContextSource.USER_INPUT,
+        content=requirements,
+        stage="init",
+    )
+
+    initial_state = {
+        "workflow_id": workflow_id,
+        "requirements": requirements,
+        "mode": mode,
+        "current_stage": entry_stage,
+        "retry_counts": {},
+        "stages_completed": [],
+        "feedback_loops": [],
+        "agent_context": agent_ctx.to_dict(),
+        "stage_costs": {},
+        "trace_id": str(uuid.uuid4()),
+        "errors": [],
+    }
+
+    # Phase 5: Cost tracking
+    cost_tracker = CostTrackingCallback(workflow_id=workflow_id)
+    config = {
+        "configurable": {"thread_id": workflow_id},
+        "callbacks": [cost_tracker],
+    }
+
+    log_stage_event("start", workflow_id, mode, data={"mode": mode})
+
+    # Execute graph (thread_id enables checkpointing/resume)
+    try:
+        final_state = await graph.ainvoke(initial_state, config=config)
+    except Exception as e:
+        log_stage_event("error", workflow_id, mode, error=str(e))
+        raise
+
+    # Check if workflow ended due to errors
+    errors = final_state.get("errors", [])
+    status = "failed" if errors else "completed"
+
+    # Phase 5: Attach cost summary
+    cost_summary = cost_tracker.get_summary()
+
+    log_stage_event("complete", workflow_id, mode, data={
+        "status": status,
+        "stages_completed": final_state.get("stages_completed", []),
+        "cost_usd": cost_summary["total_cost_usd"],
+    })
+
+    if is_langsmith_enabled():
+        workflow_logger.info(
+            f"LangSmith tracing active for {workflow_id}",
+            extra={"workflow_id": workflow_id, "trace_url": f"https://smith.langchain.com/o/..." },
+        )
+
+    return {
+        "workflow_id": workflow_id,
+        "stages_completed": final_state.get("stages_completed", []),
+        "current_stage": final_state.get("current_stage", "unknown"),
+        "status": status,
+        "outputs": {
+            "spec": final_state.get("spec"),
+            "contract_code": final_state.get("contract_code"),
+            "test_results": final_state.get("test_results"),
+            "audit_report": final_state.get("audit_report"),
+            "deployment_result": final_state.get("deployment_result"),
+            "monitoring_report": final_state.get("monitoring_report"),
+        },
+        "gitlab_issue": None,
+        "feedback_loops": final_state.get("feedback_loops", []),
+        "errors": errors,
+        "cost_summary": cost_summary,  # Phase 5
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# LangGraph imports (lazy to avoid circular deps at module load)
+# ──────────────────────────────────────────────────────────────
+
+def create_compiled_graph(mode: str = "orchestrate", persistent: bool = True):
+    """Create compiled LangGraph with checkpointing.
+
+    Args:
+        mode: "plan", "code", or "orchestrate"
+        persistent: If True, use SQLite for state persistence.
+                    If False, use in-memory (for testing).
+    """
+    if persistent:
+        from graph.graph import create_persistent_graph
+        return create_persistent_graph(mode=mode)
+    else:
+        from graph.graph import create_default_graph
+        return create_default_graph(mode=mode)
+
+
+async def get_workflow_state(workflow_id: str) -> dict | None:
+    """
+    Get the current state of a workflow by ID.
+
+    Uses LangGraph's checkpointer to retrieve the latest state.
+    Returns None if workflow not found.
+    """
+    graph = create_compiled_graph()
+    try:
+        state = graph.get_state({"configurable": {"thread_id": workflow_id}})
+        if state and state.values:
+            return dict(state.values)
+    except Exception:
+        pass
+    return None
+
+
+async def resume_workflow(workflow_id: str, human_review: dict) -> dict:
+    """
+    Resume a paused workflow after human review.
+
+    Args:
+        workflow_id: The workflow to resume
+        human_review: {"approved": bool, "comments": str}
+
+    Returns:
+        Updated workflow state or error.
+    """
+    graph = create_compiled_graph()
+
+    # Check if workflow exists
+    existing = await get_workflow_state(workflow_id)
+    if not existing:
+        return {"error": f"Workflow {workflow_id} not found"}
+
+    # Resume with human review input
+    final_state = await graph.ainvoke(
+        {"human_review": human_review},
+        config={"configurable": {"thread_id": workflow_id}},
+    )
+
+    errors = final_state.get("errors", [])
+    return {
+        "workflow_id": workflow_id,
+        "stages_completed": final_state.get("stages_completed", []),
+        "current_stage": final_state.get("current_stage", "unknown"),
+        "status": "failed" if errors else "completed",
+        "outputs": {
+            "spec": final_state.get("spec"),
+            "contract_code": final_state.get("contract_code"),
+            "test_results": final_state.get("test_results"),
+            "audit_report": final_state.get("audit_report"),
+            "deployment_result": final_state.get("deployment_result"),
+            "monitoring_report": final_state.get("monitoring_report"),
+        },
+        "feedback_loops": final_state.get("feedback_loops", []),
+        "errors": errors,
+    }

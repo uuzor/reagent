@@ -59,7 +59,17 @@
       "Bash(head:*)",
       "Bash(python3 -c \"\nimport asyncio, websockets, json\n\nasync def test\\(\\):\n    async with websockets.connect\\('ws://localhost:8001/ws/test_fix_001', open_timeout=5\\) as ws:\n        # Connection confirmed\n        msg = json.loads\\(await asyncio.wait_for\\(ws.recv\\(\\), timeout=5\\)\\)\n        print\\('1.', msg['type']\\)\n        \n        # Start workflow\n        await ws.send\\(json.dumps\\({\n            'type': 'start_workflow',\n            'workflow_id': 'test_fix_001',\n            'requirements': 'Build a simple ERC20 token',\n            'mode': 'orchestrate'\n        }\\)\\)\n        \n        # Listen for events - should NOT get datetime serialization error now\n        for _ in range\\(8\\):\n            try:\n                msg = json.loads\\(await asyncio.wait_for\\(ws.recv\\(\\), timeout=15\\)\\)\n                print\\(f'2. {msg[\\\\\"type\\\\\"]}', msg.get\\('stage', ''\\), msg.get\\('message', ''\\)[:60]\\)\n                if msg['type'] in \\('workflow.complete', 'workflow.failed'\\):\n                    break\n            except asyncio.TimeoutError:\n                print\\('   \\(timeout, no more messages\\)'\\)\n                break\n        \n        print\\('SUCCESS: No datetime serialization error!'\\)\n\nasyncio.run\\(test\\(\\)\\)\n\" 2>&1)",
       "Bash(cd /workspaces/reagent && git diff reagent/routers/websocket_router.py)",
-      "Bash(curl -s http://localhost:8001/health 2>/dev/null | head -3 || echo \"Server not running\")"
+      "Bash(curl -s http://localhost:8001/health 2>/dev/null | head -3 || echo \"Server not running\")",
+      "Bash(grep \"coding_generate_contract_code.*started\" /tmp/server.log | tail -1 | python3 -c \"\nimport sys, json\nline = sys.stdin.read\\(\\)\n# Find the JSON part\nidx = line.index\\('{\\\\\"ts\\\\\"'\\)\ndata = json.loads\\(line[idx:]\\)\nspec = data['attributes']['input_data']['spec']\nprint\\('Type of spec:', type\\(spec\\)\\)\nprint\\('First 200 chars:', str\\(spec\\)[:200]\\)\n\")",
+      "Bash(sleep 6 && curl -s http://localhost:8001/health | python3 -m json.tool)",
+      "WebFetch(forum.langchain.com)",
+      "WebFetch(callsphere.tech)",
+      "WebFetch(docs.crewai.com)",
+      "WebFetch(developers.openai.com)",
+      "WebFetch(www.metriccoders.com)",
+      "WebFetch(anmol-gupta.medium.com)",
+      "WebFetch(openai.github.io)",
+      "WebFetch(www.langchain.com)"
     ]
   }
 }

@@ -125,19 +125,25 @@ def run_slither_analysis(contract_path: str) -> dict:
 @auditing_router.skill(tags=["compliance", "erc"])
 def check_erc_compliance(code: str, standards: list[str]) -> dict:
     """
-    Check compliance with ERC standards.
+    Check compliance with ERC standards using the ERC agent.
+    Supports ERC-20, ERC-721, ERC-1155, ERC-4626, ERC-2612, ERC-777.
     """
-    compliance = {}
-    for standard in standards:
-        if standard == "ERC-20":
-            compliance[standard] = "transfer" in code and "balanceOf" in code
-        elif standard == "ERC-721":
-            compliance[standard] = "ownerOf" in code and "transferFrom" in code
-        else:
-            compliance[standard] = False
+    from agents.erc_agent import validate_erc_compliance
 
+    report = validate_erc_compliance(code, standards)
     return {
-        "standards_checked": standards,
-        "compliance": compliance,
-        "score": sum(compliance.values()) / len(standards) * 100 if standards else 0
+        "standards_checked": [r.standard for r in report.results],
+        "results": [
+            {
+                "standard": r.standard,
+                "compliant": r.compliant,
+                "score": r.compliance_score,
+                "missing_functions": r.missing_functions,
+                "missing_events": r.missing_events,
+                "description": r.description,
+            }
+            for r in report.results
+        ],
+        "overall_score": report.overall_score,
+        "likely_standard": report.likely_standard,
     }

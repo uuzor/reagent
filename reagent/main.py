@@ -139,8 +139,14 @@ app.include_router(websocket_router)
 
 if __name__ == "__main__":
     # app.run() auto-detects CLI vs server mode (sdk/python/agentfield/agent.py:4194).
-    # auto_port=False keeps the port deterministic so the README curl works.
-    print(os.getenv("PORT", "8001"))
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8001")), auto_port=False)
+    # Uses port finder agent to dynamically select an available port.
+    port_env = os.getenv("PORT")
+    if port_env:
+        port = int(port_env)
+    else:
+        from agents.port_agent import find_available_port
+        port = find_available_port(preferred=8001)
+    print(port)
+    app.run(host="0.0.0.0", port=port, auto_port=False)
 
 
