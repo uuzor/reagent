@@ -22,12 +22,14 @@ async def emit_stage_event(
     """Emit a stage lifecycle event to the EventBus.
 
     Args:
-        event_kind: "start", "complete", or "error"
+        event_kind: "start", "complete", "error", or "feedback"
         workflow_id: Workflow identifier
         stage: Stage name
         data: Optional event data payload
         error: Optional error message for error events
     """
+    from events import EventType
+
     if event_kind == "start":
         await emit_event(
             EventType.STAGE_START,
@@ -45,9 +47,17 @@ async def emit_stage_event(
         )
     elif event_kind == "error":
         await emit_event(
-            EventType.STAGE_FAILED,
+            EventType.STAGE_ERROR,
             workflow_id=workflow_id,
             stage=stage,
             data={"error": error} if error else {},
             message=f"Stage {stage} failed: {error}",
+        )
+    elif event_kind == "feedback":
+        await emit_event(
+            EventType.FEEDBACK_LOOP,
+            workflow_id=workflow_id,
+            stage=stage,
+            data=data or {},
+            message=f"Feedback loop: {stage} -> {data.get('to', 'unknown')}",
         )

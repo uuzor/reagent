@@ -10,7 +10,7 @@ async def code_node(state: ContractDevState) -> dict:
     Calls the existing code_direct_code_generation reasoner via app.call().
     Generates code directly from requirements, skipping planning/ideation.
     """
-    from ..graph.utils import get_orchestrator_router, emit_stage_event
+    from ..utils import get_orchestrator_router, emit_stage_event
 
     orchestrator = get_orchestrator_router()
     workflow_id = state.get("workflow_id", "unknown")

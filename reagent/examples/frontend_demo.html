@@ -371,6 +371,160 @@
         }
 
         .output-tab.active { background: var(--primary); color: white; border-color: var(--primary); }
+
+        /* File Tree Sidebar */
+        .file-tree-panel {
+            border-top: 1px solid var(--border);
+            margin-top: 15px;
+            padding-top: 15px;
+        }
+
+        .file-tree-panel h3 {
+            color: var(--primary);
+            margin-bottom: 10px;
+            font-size: 1em;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .file-tree-panel h3 .refresh-btn {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            color: #666;
+        }
+
+        .file-tree-panel h3 .refresh-btn:hover {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+
+        .file-tree-controls {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .file-tree-controls input {
+            flex: 1;
+            padding: 6px 8px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .file-tree-controls button {
+            padding: 6px 12px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .file-tree {
+            max-height: 350px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            background: #fafafa;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 8px;
+        }
+
+        .file-tree .tree-node {
+            cursor: pointer;
+            user-select: none;
+            padding: 2px 4px;
+            border-radius: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-tree .tree-node:hover { background: #e8e8e8; }
+
+        .file-tree .tree-node.folder { color: #4a6fa5; font-weight: 600; }
+        .file-tree .tree-node.file { color: #333; padding-left: 4px; }
+        .file-tree .tree-node.file:hover { background: #e7f5ff; color: var(--primary); }
+        .file-tree .tree-node.file.selected { background: var(--primary); color: white; }
+
+        .file-tree .tree-node .icon {
+            display: inline-block;
+            width: 18px;
+            text-align: center;
+            margin-right: 4px;
+            font-style: normal;
+        }
+
+        .file-tree .tree-node.folder .icon { color: #f39c12; }
+        .file-tree .tree-node.file .icon { color: #6c757d; }
+
+        .file-tree .tree-children { display: none; }
+        .file-tree .tree-children.expanded { display: block; }
+
+        .file-tree-loading {
+            text-align: center;
+            padding: 20px;
+            color: #888;
+            font-style: italic;
+        }
+
+        /* File Content Viewer */
+        .file-content-panel {
+            display: none;
+            margin-top: 10px;
+        }
+
+        .file-content-panel.active { display: block; }
+
+        .file-content-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 10px;
+            background: #f5f5f5;
+            border-radius: 4px 4px 0 0;
+            border: 1px solid var(--border);
+            border-bottom: none;
+            font-size: 12px;
+        }
+
+        .file-content-header .file-path {
+            font-weight: 600;
+            color: #333;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-content-header .file-meta {
+            color: #888;
+            font-size: 11px;
+        }
+
+        .file-content-viewer {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 12px;
+            border-radius: 0 0 4px 4px;
+            border: 1px solid var(--border);
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre;
+            max-height: 400px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -430,6 +584,20 @@
                     </div>
                     <button class="btn btn-sm" onclick="injectContext()" style="background: var(--info);">Inject</button>
                 </div>
+
+                <div class="file-tree-panel">
+                    <h3>
+                        File Tree
+                        <button class="refresh-btn" onclick="loadFileTree()">&#x21bb; Refresh</button>
+                    </h3>
+                    <div class="file-tree-controls">
+                        <input type="text" id="fileTreeBranch" placeholder="branch (main)" value="main">
+                        <button onclick="loadFileTree()">Load</button>
+                    </div>
+                    <div class="file-tree" id="fileTree">
+                        <div class="file-tree-loading">Click Load to browse files</div>
+                    </div>
+                </div>
             </div>
 
             <div class="content-area">
@@ -463,6 +631,13 @@
                         <div class="log" id="log"></div>
                         <button class="btn btn-sm" onclick="clearLog()" style="margin-top: 8px; background: #6c757d;">Clear Log</button>
                     </div>
+                </div>
+                <div class="file-content-panel" id="fileContentPanel">
+                    <div class="file-content-header">
+                        <span class="file-path" id="fileContentPath">No file selected</span>
+                        <span class="file-meta" id="fileContentMeta"></span>
+                    </div>
+                    <div class="file-content-viewer" id="fileContentViewer"></div>
                 </div>
             </div>
         </div>
@@ -713,6 +888,14 @@
                     break;
                 case 'pong':
                     break;
+                case 'file_tree':
+                    log(`File tree loaded: ${message.total_files} files`, 'success');
+                    renderFileTree(message.files);
+                    break;
+                case 'file_content':
+                    log(`File loaded: ${message.path}`, 'info');
+                    showFileContent(message);
+                    break;
                 default:
                     log(`${message.type}: ${message.message || JSON.stringify(message).substring(0, 100)}`, 'info');
             }
@@ -789,6 +972,137 @@
 
         function clearLog() {
             document.getElementById('log').innerHTML = '';
+        }
+
+        // File Tree
+        let fileTreeData = {};
+        let selectedFilePath = null;
+        let currentBranch = 'main';
+
+        function loadFileTree(path = '') {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected to server', 'error');
+                return;
+            }
+            currentBranch = document.getElementById('fileTreeBranch').value || 'main';
+            const treeEl = document.getElementById('fileTree');
+            treeEl.innerHTML = '<div class="file-tree-loading">Loading file tree...</div>';
+
+            ws.send(JSON.stringify({
+                type: 'file_tree',
+                branch: currentBranch,
+                path: path
+            }));
+        }
+
+        function renderFileTree(files) {
+            const treeEl = document.getElementById('fileTree');
+            if (!files || files.length === 0) {
+                treeEl.innerHTML = '<div class="file-tree-loading">No files found</div>';
+                return;
+            }
+
+            // Build tree structure from flat file list
+            const tree = {};
+            files.forEach(f => {
+                const parts = f.path.split('/');
+                let node = tree;
+                parts.forEach((part, i) => {
+                    if (i === parts.length - 1 && f.type === 'blob') {
+                        node[part] = { __type__: 'file', __path__: f.path, __size__: f.size || 0 };
+                    } else {
+                        if (!node[part]) node[part] = { __type__: 'folder' };
+                        node = node[part];
+                    }
+                });
+            });
+
+            fileTreeData = tree;
+            treeEl.innerHTML = '';
+            renderTreeNode(tree, treeEl, 0);
+        }
+
+        function renderTreeNode(node, parentEl, depth) {
+            const keys = Object.keys(node).filter(k => !k.startsWith('__')).sort((a, b) => {
+                // Folders first, then files
+                const aIsFolder = !node[a].__type__ || node[a].__type__ === 'folder';
+                const bIsFolder = !node[b].__type__ || node[b].__type__ === 'folder';
+                if (aIsFolder && !bIsFolder) return -1;
+                if (!aIsFolder && bIsFolder) return 1;
+                return a.localeCompare(b);
+            });
+
+            keys.forEach(key => {
+                const child = node[key];
+                const isFolder = !child.__type__ || child.__type__ === 'folder';
+
+                const nodeEl = document.createElement('div');
+                nodeEl.className = `tree-node ${isFolder ? 'folder' : 'file'}`;
+                nodeEl.style.paddingLeft = `${depth * 16 + 4}px`;
+
+                const icon = document.createElement('i');
+                icon.className = 'icon';
+                icon.textContent = isFolder ? '&#x1f4c1;' : '&#x1f4c4;';
+
+                const label = document.createElement('span');
+                label.textContent = key;
+
+                nodeEl.appendChild(icon);
+                nodeEl.appendChild(label);
+
+                if (isFolder) {
+                    const childrenEl = document.createElement('div');
+                    childrenEl.className = 'tree-children';
+                    renderTreeNode(child, childrenEl, depth + 1);
+                    parentEl.appendChild(nodeEl);
+                    parentEl.appendChild(childrenEl);
+
+                    nodeEl.onclick = () => {
+                        childrenEl.classList.toggle('expanded');
+                        icon.innerHTML = childrenEl.classList.contains('expanded') ? '&#x1f4c2;' : '&#x1f4c1;';
+                    };
+                    icon.innerHTML = '&#x1f4c2;'; // Open folder icon
+                } else {
+                    nodeEl.onclick = () => {
+                        document.querySelectorAll('.tree-node.file.selected').forEach(el => el.classList.remove('selected'));
+                        nodeEl.classList.add('selected');
+                        selectedFilePath = child.__path__;
+                        loadFileContent(child.__path__);
+                    };
+                    parentEl.appendChild(nodeEl);
+                }
+            });
+        }
+
+        function loadFileContent(filePath) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected to server', 'error');
+                return;
+            }
+            ws.send(JSON.stringify({
+                type: 'read_file',
+                path: filePath,
+                branch: currentBranch
+            }));
+        }
+
+        function showFileContent(data) {
+            const panel = document.getElementById('fileContentPanel');
+            const pathEl = document.getElementById('fileContentPath');
+            const metaEl = document.getElementById('fileContentMeta');
+            const viewer = document.getElementById('fileContentViewer');
+
+            panel.classList.add('active');
+            pathEl.textContent = data.path;
+            metaEl.textContent = `${data.category || ''} | ${formatFileSize(data.size || 0)}`;
+            viewer.textContent = data.content;
+            viewer.scrollTop = 0;
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
         }
 
         // Enter key submits answer

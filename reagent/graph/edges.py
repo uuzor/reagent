@@ -12,6 +12,8 @@ from typing import Optional
 
 from .state import ContractDevState
 
+MAX_RETRIES = 3
+
 
 class RoutingDecision(BaseModel):
     """Structured AI output for routing decisions.
@@ -145,33 +147,53 @@ def _fallback_route(stage: str, state: ContractDevState, candidates: list[str]) 
 async def route_after_testing(state: ContractDevState) -> str:
     """AI-powered routing after testing stage."""
     decision = await ai_route_after_stage(state, "testing", ["auditing", "coding", "end"])
-    return _normalize_next_stage(decision.next_stage)
+    next_stage = _normalize_next_stage(decision.next_stage)
+
+    # Emit feedback loop event if routing back to coding
+    if next_stage == "coding":
+        from .utils import emit_stage_event
+        wf_id = state.get("workflow_id", "unknown")
+        await emit_stage_event("feedback", wf_id, "testing", data={
+            "from": "testing",
+            "to": "coding",
+            "reason": decision.reason,
+        })
+
+    return next_stage
 
 
 async def route_after_auditing(state: ContractDevState) -> str:
     """AI-powered routing after auditing stage."""
     decision = await ai_route_after_stage(state, "auditing", ["deployment", "coding", "end"])
-    return _normalize_next_stage(decision.next_stage)
+    next_stage = _normalize_next_stage(decision.next_stage)
+
+    if next_stage == "coding":
+        from .utils import emit_stage_event
+        wf_id = state.get("workflow_id", "unknown")
+        await emit_stage_event("feedback", wf_id, "auditing", data={
+            "from": "auditing",
+            "to": "coding",
+            "reason": decision.reason,
+        })
+
+    return next_stage
 
 
 async def route_after_deployment(state: ContractDevState) -> str:
     """AI-powered routing after deployment stage."""
     decision = await ai_route_after_stage(state, "deployment", ["monitoring", "coding", "end"])
-    return _normalize_next_stage(decision.next_stage)
+    next_stage = _normalize_next_stage(decision.next_stage)
 
+    if next_stage == "coding":
+        from .utils import emit_stage_event
+        wf_id = state.get("workflow_id", "unknown")
+        await emit_stage_event("feedback", wf_id, "deployment", data={
+            "from": "deployment",
+            "to": "coding",
+            "reason": decision.reason,
+        })
 
-# ──────────────────────────────────────────────────────────────
-# Static routing (no AI needed — always proceed)
-# ──────────────────────────────────────────────────────────────
-
-def route_after_coding(state: ContractDevState) -> str:
-    """Always proceed to testing after coding."""
-    return "testing"
-
-
-def route_after_ideation(state: ContractDevState) -> str:
-    """Always proceed to coding after ideation."""
-    return "coding"
+    return next_stage
 
 
 # ──────────────────────────────────────────────────────────────
@@ -212,29 +234,3 @@ def _summarize_output(stage: str, output: dict) -> str:
     elif stage == "ideation":
         return f"Spec: {output.get('name', 'unknown')}, Standards: {output.get('standards', [])}"
     return str(output)[:200]
-
-
-# ──────────────────────────────────────────────────────────────
-# Mapping for conditional edge configuration
-# ──────────────────────────────────────────────────────────────
-
-ROUTE_MAP = {
-    "ideation": {"coding": "coding"},
-    "coding": {"testing": "testing"},
-    "testing": {
-        "auditing": "auditing",
-        "coding": "coding",
-        "__end__": "__end__",
-    },
-    "auditing": {
-        "deployment": "deployment",
-        "coding": "coding",
-        "__end__": "__end__",
-    },
-    "deployment": {
-        "monitoring": "monitoring",
-        "coding": "coding",
-        "__end__": "__end__",
-    },
-    "monitoring": {"__end__": "__end__"},
-}

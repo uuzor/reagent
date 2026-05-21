@@ -12,7 +12,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from agentfield import Agent, AIConfig
 
-from reasoners import reasoners_router
 from routers import (
     ideation_router,
     coding_router,
@@ -121,7 +120,6 @@ app = Agent(
     dev_mode=True,
 )
 
-app.include_router(reasoners_router)
 app.include_router(ideation_router)
 app.include_router(coding_router)
 app.include_router(testing_router)

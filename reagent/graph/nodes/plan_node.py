@@ -10,7 +10,7 @@ async def plan_node(state: ContractDevState) -> dict:
     Calls the existing plan_analyze_and_plan reasoner via app.call().
     Analyzes requirements and produces a development plan without executing.
     """
-    from ..graph.utils import get_orchestrator_router, emit_stage_event
+    from ..utils import get_orchestrator_router, emit_stage_event
 
     orchestrator = get_orchestrator_router()
     workflow_id = state.get("workflow_id", "unknown")

@@ -10,7 +10,7 @@ async def auditing_node(state: ContractDevState) -> dict:
     Calls the existing auditing reasoner via app.call().
     Requires contract code from the coding stage.
     """
-    from ..graph.utils import get_orchestrator_router, emit_stage_event
+    from ..utils import get_orchestrator_router, emit_stage_event
 
     orchestrator = get_orchestrator_router()
     workflow_id = state.get("workflow_id", "unknown")
@@ -31,6 +31,16 @@ async def auditing_node(state: ContractDevState) -> dict:
         ctx = state.get("agent_context")
         if ctx:
             kwargs["context"] = ctx
+
+        # Run automated security scan before AI audit
+        try:
+            from agents.security_agent import run_security_scan
+            solidity_code = code.get("solidity_code", "") if isinstance(code, dict) else ""
+            if solidity_code:
+                scan_results = run_security_scan(solidity_code)
+                kwargs["security_scan_results"] = scan_results
+        except Exception:
+            pass  # Fallback: AI audit without scan results
 
         audit = await orchestrator.app.call(
             f"{orchestrator.app.node_id}.auditing_perform_audit",

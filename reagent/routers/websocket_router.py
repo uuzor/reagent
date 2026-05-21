@@ -199,7 +199,66 @@ async def websocket_endpoint(websocket: WebSocket, workflow_id: str):
                     "type": "pong",
                     "timestamp": datetime.utcnow().isoformat()
                 })
-            
+
+            elif msg_type == "file_tree":
+                # Request file tree for a branch/repo
+                branch = message.get("branch", "main")
+                path = message.get("path", "")
+
+                try:
+                    from file_manager import FileManager
+                    fm = FileManager()
+                    files = fm.list_tree(branch=branch, path=path)
+                    tree_str = fm.tree_ascii(branch=branch, path=path)
+
+                    await websocket.send_json({
+                        "type": "file_tree",
+                        "workflow_id": workflow_id,
+                        "branch": branch,
+                        "path": path,
+                        "files": files,
+                        "tree": tree_str,
+                        "total_files": len([f for f in files if f.get("type") == "blob"]),
+                    })
+                except Exception as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Failed to get file tree: {str(e)}"
+                    })
+
+            elif msg_type == "read_file":
+                # Request file content
+                file_path = message.get("path", "")
+                branch = message.get("branch", "main")
+
+                if not file_path:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Missing path"
+                    })
+                    continue
+
+                try:
+                    from file_manager import FileManager
+                    fm = FileManager()
+                    content = fm.read_file(file_path, branch=branch)
+                    category = fm.file_category(file_path)
+
+                    await websocket.send_json({
+                        "type": "file_content",
+                        "workflow_id": workflow_id,
+                        "path": file_path,
+                        "branch": branch,
+                        "content": content,
+                        "category": category,
+                        "size": len(content),
+                    })
+                except Exception as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Failed to read file: {str(e)}"
+                    })
+
             else:
                 # Unknown message type
                 await websocket.send_json({
@@ -223,30 +282,47 @@ async def start_interactive_workflow(
     requirements: str,
     mode: str
 ):
-    """Start interactive workflow (called from WebSocket).
-    
+    """Start interactive workflow via LangGraph (called from WebSocket).
+
     Args:
         workflow_id: Workflow ID
         requirements: User requirements
         mode: Execution mode (orchestrate, plan, code)
     """
     try:
-        # Import here to avoid circular dependency
-        from routers.orchestrator_router import orchestrate_contract_development_interactive
-        
-        logger.info(f"Starting interactive workflow: {workflow_id}")
-        
-        result = await orchestrate_contract_development_interactive(
-            workflow_id=workflow_id,
+        from routers.orchestrator_router import run_contract_workflow
+        from events import get_event_bus, EventType, WorkflowEvent
+
+        logger.info(f"Starting interactive LangGraph workflow: {workflow_id}")
+
+        result = await run_contract_workflow(
             requirements=requirements,
-            mode=mode
+            mode=mode,
+            workflow_id=workflow_id,
         )
-        
+
+        # Emit workflow complete event (LangGraph doesn't emit this)
+        status = result.get("status", "completed")
+        if status == "failed":
+            await get_event_bus().emit(WorkflowEvent(
+                event_type=EventType.WORKFLOW_FAILED,
+                workflow_id=workflow_id,
+                data={"errors": result.get("errors", [])},
+                message=f"Workflow failed: {result.get('errors', [])}"
+            ))
+        else:
+            await get_event_bus().emit(WorkflowEvent(
+                event_type=EventType.WORKFLOW_COMPLETE,
+                workflow_id=workflow_id,
+                data={"stages": result.get("stages_completed", [])},
+                message="Workflow completed successfully"
+            ))
+
         logger.info(f"Interactive workflow completed: {workflow_id}")
-        
+
     except Exception as e:
         logger.error(f"Interactive workflow failed: {e}")
-        
+
         await get_event_bus().emit(WorkflowEvent(
             event_type=EventType.WORKFLOW_FAILED,
             workflow_id=workflow_id,

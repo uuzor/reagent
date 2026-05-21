@@ -684,15 +684,30 @@ class CodespaceOrchestrator:
         self,
         workflow: CodespaceWorkflow,
         config: CodespaceConfig,
+        project_type: str = "solidity",
     ) -> str:
         """Create a Codespace, wait for it to become available, install deps.
 
+        Uses devconfig_agent to select appropriate machine type based on
+        project requirements instead of hardcoded defaults.
+
         Returns the codespace name.
         """
+        from agents.devconfig_agent import select_codespace_machine
+
         owner, repo = config.repository.split("/", 1)
+
+        # Select machine type using agent (if not explicitly set)
+        machine = config.machine
+        if not machine or machine == "standardLinux32gb":
+            machine = select_codespace_machine(
+                task_requirements={"cpus": 4, "memory_gb": 16},
+                budget_per_hour=0.50,
+            )
+
         request = CodespaceCreateRequest(
             ref=config.branch,
-            machine=config.machine,
+            machine=machine,
             idle_timeout_minutes=config.idle_timeout_minutes,
             retention_period_minutes=config.retention_period_minutes,
             devcontainer_path=config.devcontainer_path,
@@ -726,16 +741,23 @@ class CodespaceOrchestrator:
         self,
         workflow: CodespaceWorkflow,
         requirements: str,
+        project_type: str = "solidity",
     ) -> Dict[str, Any]:
-        """Push devcontainer + config files as commits and run the workflow."""
+        """Push devcontainer + config files as commits and run the workflow.
+
+        Uses devconfig_agent to generate context-aware devcontainer config
+        instead of hardcoded defaults.
+        """
         owner, repo = workflow.repository.split("/", 1)
 
-        # Create devcontainer in the repo
-        devcontainer = DevcontainerConfig()
+        # Generate devcontainer config using agent
+        from agents.devconfig_agent import generate_devcontainer_config
+        devcontainer = generate_devcontainer_config(project_type=project_type)
+
         await self.client.create_devcontainer_file(
             owner, repo, workflow.branch, devcontainer,
         )
-        workflow.execution_logs.append("Devcontainer configuration pushed")
+        workflow.execution_logs.append(f"Devcontainer configuration pushed ({devcontainer.image})")
 
         # Execute the orchestration command in the Codespace
         escaped = requirements.replace("'", "'\\''")

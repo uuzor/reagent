@@ -11,7 +11,7 @@ async def ideation_node(state: ContractDevState) -> dict:
     Calls the existing ideation_generate_contract_spec reasoner via app.call().
     Returns partial state update with spec and tracking fields.
     """
-    from ..graph.utils import get_orchestrator_router, emit_stage_event
+    from ..utils import get_orchestrator_router, emit_stage_event
 
     orchestrator = get_orchestrator_router()
     workflow_id = state.get("workflow_id", "unknown")

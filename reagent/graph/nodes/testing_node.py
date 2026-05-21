@@ -10,7 +10,7 @@ async def testing_node(state: ContractDevState) -> dict:
     Calls the existing testing reasoner via app.call().
     Requires contract code from the coding stage.
     """
-    from ..graph.utils import get_orchestrator_router, emit_stage_event
+    from ..utils import get_orchestrator_router, emit_stage_event
 
     orchestrator = get_orchestrator_router()
     workflow_id = state.get("workflow_id", "unknown")
@@ -27,10 +27,23 @@ async def testing_node(state: ContractDevState) -> dict:
         }
 
     try:
-        kwargs = {"code": code}
+        # The coding node stores contract_code in state; the reasoner needs
+        # either a file path (GitLab) or the raw code for local testing.
+        code = state.get("contract_code")
+        if not code:
+            error = "No contract code from coding stage"
+            await emit_stage_event("error", workflow_id, "testing", error=error)
+            return {
+                "errors": state.get("errors", []) + [{"stage": "testing", "error": error}],
+                "current_stage": "testing",
+            }
+
+        # Try to get contract_path from code output (set by FileManager during coding)
+        contract_path = code.get("contract_path", "")
+        kwargs = {"contract_path": contract_path} if contract_path else {"contract_path": ""}
 
         test_results = await orchestrator.app.call(
-            f"{orchestrator.app.node_id}.testing_run_tests",
+            f"{orchestrator.app.node_id}.testing_run_comprehensive_tests",
             **kwargs,
         )
 

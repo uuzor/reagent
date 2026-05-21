@@ -142,25 +142,24 @@ def create_persistent_graph(
     db_path: str = ".langgraph.db",
 ):
     """
-    Create a compiled graph with SQLite checkpointing (production-ready).
+    Create a compiled graph with in-memory checkpointing.
 
-    State survives restarts. Workflows can be resumed by thread_id.
+    Note: SQLite persistence requires async context manager lifecycle
+    (open/close) which is managed at the workflow execution level.
+    For true persistence, use `create_compiled_graph` with an
+    externally-managed `AsyncSqliteSaver`.
 
     Args:
         mode: "plan", "code", or "orchestrate"
-        db_path: Path to SQLite database file
+        db_path: Reserved for future async SQLite integration
 
     Returns:
-        Compiled LangGraph with SQLite checkpointing and human review gates.
+        Compiled LangGraph with in-memory checkpointing and human review gates.
     """
-    import aiosqlite
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
-    conn = aiosqlite.connect(db_path)
-    checkpointer = SqliteSaver(conn)
+    from langgraph.checkpoint.memory import InMemorySaver
 
     return create_compiled_graph(
         mode=mode,
-        checkpointer=checkpointer,
+        checkpointer=InMemorySaver(),
         interrupt_after=["coding", "auditing"] if mode == "orchestrate" else None,
     )

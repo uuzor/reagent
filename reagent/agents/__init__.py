@@ -13,8 +13,6 @@ from .security_agent import run_security_scan, multi_tool_analysis
 from .erc_agent import validate_erc_compliance
 from .test_agent import detect_test_framework, parse_test_output
 from .pricing_agent import get_model_pricing, get_cost_summary
-from .context_agent import score_context_relevance, calculate_context_budget
-from .solc_agent import resolve_solc_version
 from .devconfig_agent import generate_devcontainer_config, select_codespace_machine
 from .port_agent import find_available_port
 
@@ -49,11 +47,6 @@ __all__ = [
     # Pricing
     "get_model_pricing",
     "get_cost_summary",
-    # Context
-    "score_context_relevance",
-    "calculate_context_budget",
-    # Solc
-    "resolve_solc_version",
     # Devconfig
     "generate_devcontainer_config",
     "select_codespace_machine",

@@ -10,7 +10,7 @@ async def monitoring_node(state: ContractDevState) -> dict:
     Calls the existing monitoring reasoner via app.call().
     Requires deployment result from the deployment stage.
     """
-    from ..graph.utils import get_orchestrator_router, emit_stage_event
+    from ..utils import get_orchestrator_router, emit_stage_event
 
     orchestrator = get_orchestrator_router()
     workflow_id = state.get("workflow_id", "unknown")
@@ -27,13 +27,28 @@ async def monitoring_node(state: ContractDevState) -> dict:
         }
 
     try:
-        kwargs = {"deployment": deployment}
+        deployment = state.get("deployment_result")
+        if not deployment:
+            error = "No deployment result for monitoring"
+            await emit_stage_event("error", workflow_id, "monitoring", error=error)
+            return {
+                "errors": state.get("errors", []) + [{"stage": "monitoring", "error": error}],
+                "current_stage": "monitoring",
+            }
+
+        contract_address = deployment.get("contract_address", "")
+        network = deployment.get("network", "mainnet")
+
+        kwargs = {
+            "contract_address": contract_address,
+            "network": network,
+        }
         ctx = state.get("agent_context")
         if ctx:
             kwargs["context"] = ctx
 
         result = await orchestrator.app.call(
-            f"{orchestrator.app.node_id}.monitoring_setup",
+            f"{orchestrator.app.node_id}.monitoring_monitor_contract",
             **kwargs,
         )
 
